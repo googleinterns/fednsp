@@ -1,7 +1,9 @@
 # FedNSP
 
-Exploring Federated Averaging (simulations) for improving Neural Semantic Parsing.
+Disclaimer: “This is not an officially supported Google product”
 
-This is a new intern project for Summer 2020. More details will follow here.
+Goal: Try Federated Averaging (simulations) for improving Neural Semantic Parsing.
+
+This is a new intern project for Summer 2020.
 
 More details will be added here as the project progresses.

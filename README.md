@@ -6,4 +6,10 @@ Goal: Try Federated Averaging (simulations) for improving Neural Semantic Parsin
 
 This is a new intern project for Summer 2020.
 
-More details will be added here as the project progresses.
+## Milestone 1 
+### Timeline May 18, 2020 - May 29, 2020 (tentative)
+- Implement and train SOTA model using transformers (without federation)
+
+
+
+

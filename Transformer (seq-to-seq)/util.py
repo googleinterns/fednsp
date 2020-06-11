@@ -1,21 +1,35 @@
 """This file defines the utils for the model.
 
 This file contains helper functions used by train_model.py. It defines
-function for creating the vocabulary and loading and preprocessing the 
+function for creating the vocabulary and loading and preprocessing the
 dataset. Additionally, it contains functions to compute certain
 metrics like F1 score, sentence-level semantic frame accuracy, etc.
-Some of the code was in this file was taken from 
+Some of the code was in this file was taken from
 https://github.com/ZephyrChenzf/SF-ID-Network-For-NLU/blob/master/utils.py
 
 """
 
-import os
-import sys
 import tensorflow as tf
 import numpy as np
-import time
 
-def createVocabulary(input_path, output_path, no_pad=False, no_unk=False):
+PADDING_TOKEN = '__PAD'
+UNK_TOKEN = '__UNK'
+SOS_TOKEN = '__SOS'
+EOS_TOKEN = '__EOS'
+
+
+def create_vocabulary(input_path, output_path, no_pad=False, no_unk=False):
+    """Creates the vocabulary by parsing the given data ans saves it in
+    the output path.
+
+    Args:
+    input_path: The path to the corpus for which vocabulary has to be built.
+    output_path: The path to which the vocabulary has to be saved.
+    no_pad: A boolean variable to indicate if a padding token is to be
+        added to the vocabulary.
+    no_unk: A boolean variable to indicate if a unknown token is to be
+        added to the vocabulary.
+    """
     if not isinstance(input_path, str):
         raise TypeError('input_path should be string')
 
@@ -25,28 +39,41 @@ def createVocabulary(input_path, output_path, no_pad=False, no_unk=False):
     vocab = {}
     with open(input_path, 'r') as fd, \
             open(output_path, 'w+') as out:
+
         for line in fd:
             line = line.rstrip('\r\n')
             words = line.split()
 
-            for w in words:
-                if w == '_UNK':
+            for word in words:
+                if word == UNK_TOKEN:
                     pass
-                if str.isdigit(w) == True:
-                    w = '0'
-                if w in vocab:
-                    vocab[w] += 1
+                if str.isdigit(word):
+                    word = '0'
+                if word in vocab:
+                    vocab[word] += 1
                 else:
-                    vocab[w] = 1
-        if no_pad == False:
-            vocab = ['_PAD', '__SOS', '__EOS', '_UNK'] + sorted(vocab, key=vocab.get, reverse=True)
+                    vocab[word] = 1
+        if not no_pad:
+            vocab = [PADDING_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + sorted(
+                vocab, key=vocab.get, reverse=True)
         else:
-            vocab = ['_UNK'] + sorted(vocab, key=vocab.get, reverse=True)
-        for v in vocab:
-            out.write(v + '\n')
+            vocab = [UNK_TOKEN] + sorted(vocab, key=vocab.get, reverse=True)
+        for vocab_word in vocab:
+            out.write(vocab_word + '\n')
 
 
-def loadVocabulary(path):
+def load_vocabulary(path):
+    """Loads the vocabulary from the given path and constructs a dictionary for
+    mapping of vocabulary to numerical ID's as well as a list for the reverse
+    mapping.
+
+    Args:
+    path: The path from which the vocabulary has to be loaded.
+
+    Returns:
+    A dictionary of forward and reverse mappings.
+    """
+
     if not isinstance(path, str):
         raise TypeError('path should be a string')
 
@@ -60,7 +87,19 @@ def loadVocabulary(path):
 
     return {'vocab': vocab, 'rev': rev}
 
-def sentenceToIds(data, vocab):
+
+def sentence_to_ids(data, vocab):
+    """Converts the given sentence to a list of integers based on the
+    vocabulary mappings.
+
+    Args:
+    data: The sentence to be converted into a list of ID's.
+    vocab: The vocabulary returned by load_vocabulary().
+
+    Returns:
+    The list of integers corresponding to the input sentence.
+    """
+
     if not isinstance(vocab, dict):
         raise TypeError('vocab should be a dict that contains vocab and rev')
     vocab = vocab['vocab']
@@ -72,304 +111,450 @@ def sentenceToIds(data, vocab):
         raise TypeError('data should be a string or a list contains words')
 
     ids = []
-    for w in words:
-        if str.isdigit(w) == True:
-            w = '0'
-        ids.append(vocab.get(w, vocab['_UNK']))
+    for word in words:
+        if str.isdigit(word):
+            word = '0'
+        ids.append(vocab.get(word, vocab[UNK_TOKEN]))
     return ids
 
-def padSentence(s, max_length, vocab):
-    return s + [vocab['vocab']['_PAD']] * (max_length - len(s))
+
+def pad_sentence(sequence, max_length, vocab):
+    """Pads the given sentence to max_length by adding padding tokens.
+
+    Args:
+    sequence: The sentence to be padded.
+    max_length: The length of the sentence after padding.
+    vocab:  The vocabulary returned by load_vocabulary().
+
+    Returns:
+    The sentence padded with padding token.
+    """
+
+    return sequence + [vocab['vocab'][PADDING_TOKEN]] * (max_length - len(sequence))
 
 
 # compute f1 score is modified from conlleval.pl
-def __startOfChunk(prevTag, tag, prevTagType, tagType, chunkStart=False):
-    if prevTag == 'B' and tag == 'B':
-        chunkStart = True
-    if prevTag == 'I' and tag == 'B':
-        chunkStart = True
-    if prevTag == 'O' and tag == 'B':
-        chunkStart = True
-    if prevTag == 'O' and tag == 'I':
-        chunkStart = True
+def start_of_chunk(prev_tag, tag, prev_tag_type, tag_type, chunk_start=False):
+    """Checks if the current tag indicates the start of a new chunk.
 
-    if prevTag == 'E' and tag == 'E':
-        chunkStart = True
-    if prevTag == 'E' and tag == 'I':
-        chunkStart = True
-    if prevTag == 'O' and tag == 'E':
-        chunkStart = True
-    if prevTag == 'O' and tag == 'I':
-        chunkStart = True
+    Args:
+    prev_tag: The tag of the previous token.
+    tag: The tag of the current token.
+    prev_tag_type: The tag type of the previous token.
+    tag_type: The tag type of the previous token.
 
-    if tag != 'O' and tag != '.' and prevTagType != tagType:
-        chunkStart = True
-    return chunkStart
+    Returns:
+    A boolean variable indicating if the current tag is the beginning of a new
+    chunk.
+    """
 
+    if prev_tag == 'B' and tag == 'B':
+        chunk_start = True
+    if prev_tag == 'I' and tag == 'B':
+        chunk_start = True
+    if prev_tag == 'O' and tag == 'B':
+        chunk_start = True
+    if prev_tag == 'O' and tag == 'I':
+        chunk_start = True
 
-def __endOfChunk(prevTag, tag, prevTagType, tagType, chunkEnd=False):
-    if prevTag == 'B' and tag == 'B':
-        chunkEnd = True
-    if prevTag == 'B' and tag == 'O':
-        chunkEnd = True
-    if prevTag == 'I' and tag == 'B':
-        chunkEnd = True
-    if prevTag == 'I' and tag == 'O':
-        chunkEnd = True
+    if prev_tag == 'E' and tag == 'E':
+        chunk_start = True
+    if prev_tag == 'E' and tag == 'I':
+        chunk_start = True
+    if prev_tag == 'O' and tag == 'E':
+        chunk_start = True
+    if prev_tag == 'O' and tag == 'I':
+        chunk_start = True
 
-    if prevTag == 'E' and tag == 'E':
-        chunkEnd = True
-    if prevTag == 'E' and tag == 'I':
-        chunkEnd = True
-    if prevTag == 'E' and tag == 'O':
-        chunkEnd = True
-    if prevTag == 'I' and tag == 'O':
-        chunkEnd = True
-
-    if prevTag != 'O' and prevTag != '.' and prevTagType != tagType:
-        chunkEnd = True
-    return chunkEnd
+    if tag != 'O' and tag != '.' and prev_tag_type != tag_type:
+        chunk_start = True
+    return chunk_start
 
 
-def __splitTagType(tag):
-    s = tag.split('-')
-    if len(s) > 2 or len(s) == 0:
+def end_of_chunk(prev_tag, tag, prev_tag_type, tag_type, chunk_end=False):
+    """Checks if the current tag indicates the end of a chunk.
+
+    Args:
+    prev_tag: The tag of the previous token.
+    tag: The tag of the current token.
+    prev_tag_type: The tag type of the previous token.
+    tag_type: The tag type of the previous token.
+
+    Returns:
+    A boolean variable indicating if the current tag is the end of a
+    chunk.
+    """
+
+    if prev_tag == 'B' and tag == 'B':
+        chunk_end = True
+    if prev_tag == 'B' and tag == 'O':
+        chunk_end = True
+    if prev_tag == 'I' and tag == 'B':
+        chunk_end = True
+    if prev_tag == 'I' and tag == 'O':
+        chunk_end = True
+
+    if prev_tag == 'E' and tag == 'E':
+        chunk_end = True
+    if prev_tag == 'E' and tag == 'I':
+        chunk_end = True
+    if prev_tag == 'E' and tag == 'O':
+        chunk_end = True
+    if prev_tag == 'I' and tag == 'O':
+        chunk_end = True
+
+    if prev_tag != 'O' and prev_tag != '.' and prev_tag_type != tag_type:
+        chunk_end = True
+    return chunk_end
+
+
+def split_tag_type(tag):
+    """Extracts and returns the tag and tag type.
+    """
+
+    split_tag = tag.split('-')
+    if len(split_tag) > 2 or len(split_tag) == 0:
         raise ValueError('tag format wrong. it must be B-xxx.xxx')
-    if len(s) == 1:
-        tag = s[0]
-        tagType = ""
+    if len(split_tag) == 1:
+        tag = split_tag[0]
+        tag_type = ""
     else:
-        tag = s[0]
-        tagType = s[1]
-    return tag, tagType
+        tag = split_tag[0]
+        tag_type = split_tag[1]
+    return tag, tag_type
 
 
-def computeF1Score(correct_slots, pred_slots):
-    correctChunk = {}
-    correctChunkCnt = 0
-    foundCorrect = {}
-    foundCorrectCnt = 0
-    foundPred = {}
-    foundPredCnt = 0
-    correctTags = 0
-    tokenCount = 0
+def compute_f1(correct_slots, pred_slots):
+    """Computes and returns the f1 score of the predicted slots.
+
+    Args:
+    correct_slots: The ground truth slot labels.
+    pred_slots:  The predicted slot labels.
+
+    Returns:
+    The slot f1 score.
+    """
+
+    correct_chunk = {}
+    correct_chunk_cnt = 0
+    found_correct = {}
+    found_correct_cnt = 0
+    found_pred = {}
+    found_pred_cnt = 0
+    correct_tags = 0
+    token_count = 0
     for correct_slot, pred_slot in zip(correct_slots, pred_slots):
-        inCorrect = False
-        lastCorrectTag = 'O'
-        lastCorrectType = ''
-        lastPredTag = 'O'
-        lastPredType = ''
+        in_correct = False
+        last_correct_tag = 'O'
+        last_correct_type = ''
+        last_pred_tag = 'O'
+        last_pred_type = ''
         for c, p in zip(correct_slot, pred_slot):
-            correctTag, correctType = __splitTagType(c)
-            predTag, predType = __splitTagType(p)
+            correct_tag, correct_type = split_tag_type(c)
+            pred_tag, pred_type = split_tag_type(p)
 
-            if inCorrect == True:
-                if __endOfChunk(lastCorrectTag, correctTag, lastCorrectType, correctType) == True and \
-                        __endOfChunk(lastPredTag, predTag, lastPredType, predType) == True and \
-                        (lastCorrectType == lastPredType):
-                    inCorrect = False
-                    correctChunkCnt += 1
-                    if lastCorrectType in correctChunk:
-                        correctChunk[lastCorrectType] += 1
+            if in_correct:
+                if end_of_chunk(last_correct_tag, correct_tag,
+                                last_correct_type, correct_type) and \
+                                end_of_chunk(last_pred_tag, pred_tag,
+                                             last_pred_type, pred_type) and \
+                                    (last_correct_type == last_pred_type):
+                    in_correct = False
+                    correct_chunk_cnt += 1
+                    if last_correct_type in correct_chunk:
+                        correct_chunk[last_correct_type] += 1
                     else:
-                        correctChunk[lastCorrectType] = 1
-                elif __endOfChunk(lastCorrectTag, correctTag, lastCorrectType, correctType) != \
-                        __endOfChunk(lastPredTag, predTag, lastPredType, predType) or \
-                        (correctType != predType):
-                    inCorrect = False
+                        correct_chunk[last_correct_type] = 1
+                elif end_of_chunk(last_correct_tag, correct_tag,
+                                  last_correct_type, correct_type) != \
+                                  end_of_chunk(last_pred_tag, pred_tag,
+                                               last_pred_type, pred_type) or \
+                                     (correct_type != pred_type):
+                    in_correct = False
 
-            if __startOfChunk(lastCorrectTag, correctTag, lastCorrectType, correctType) == True and \
-                    __startOfChunk(lastPredTag, predTag, lastPredType, predType) == True and \
-                    (correctType == predType):
-                inCorrect = True
+            if start_of_chunk(last_correct_tag, correct_tag,
+                              last_correct_type, correct_type) and \
+                                start_of_chunk(last_pred_tag, pred_tag,
+                                               last_pred_type, pred_type) and \
+                                    (correct_type == pred_type):
+                in_correct = True
 
-            if __startOfChunk(lastCorrectTag, correctTag, lastCorrectType, correctType) == True:
-                foundCorrectCnt += 1
-                if correctType in foundCorrect:
-                    foundCorrect[correctType] += 1
+            if start_of_chunk(last_correct_tag, correct_tag, last_correct_type,
+                              correct_type):
+                found_correct_cnt += 1
+                if correct_type in found_correct:
+                    found_correct[correct_type] += 1
                 else:
-                    foundCorrect[correctType] = 1
+                    found_correct[correct_type] = 1
 
-            if __startOfChunk(lastPredTag, predTag, lastPredType, predType) == True:
-                foundPredCnt += 1
-                if predType in foundPred:
-                    foundPred[predType] += 1
+            if start_of_chunk(last_pred_tag, pred_tag, last_pred_type,
+                              pred_type):
+                found_pred_cnt += 1
+                if pred_type in found_pred:
+                    found_pred[pred_type] += 1
                 else:
-                    foundPred[predType] = 1
+                    found_pred[pred_type] = 1
 
-            if correctTag == predTag and correctType == predType:
-                correctTags += 1
+            if correct_tag == pred_tag and correct_type == pred_type:
+                correct_tags += 1
 
-            tokenCount += 1
+            token_count += 1
 
-            lastCorrectTag = correctTag
-            lastCorrectType = correctType
-            lastPredTag = predTag
-            lastPredType = predType
+            last_correct_tag = correct_tag
+            last_correct_type = correct_type
+            last_pred_tag = pred_tag
+            last_pred_type = pred_type
 
-        if inCorrect == True:
-            correctChunkCnt += 1
-            if lastCorrectType in correctChunk:
-                correctChunk[lastCorrectType] += 1
+        if in_correct:
+            correct_chunk_cnt += 1
+            if last_correct_type in correct_chunk:
+                correct_chunk[last_correct_type] += 1
             else:
-                correctChunk[lastCorrectType] = 1
+                correct_chunk[last_correct_type] = 1
 
-    if foundPredCnt > 0:
-        precision = 100 * correctChunkCnt / foundPredCnt
+    if found_pred_cnt > 0:
+        precision = 100 * correct_chunk_cnt / found_pred_cnt
     else:
         precision = 0
 
-    if foundCorrectCnt > 0:
-        recall = 100 * correctChunkCnt / foundCorrectCnt
+    if found_correct_cnt > 0:
+        recall = 100 * correct_chunk_cnt / found_correct_cnt
     else:
         recall = 0
 
     if (precision + recall) > 0:
-        f1 = (2 * precision * recall) / (precision + recall)
+        f1_score = (2 * precision * recall) / (precision + recall)
     else:
-        f1 = 0
+        f1_score = 0
 
-    return f1, precision, recall
+    return f1_score, precision, recall
 
 
-def load_data(in_path, slot_path, intent_path, in_vocab, slot_vocab, intent_vocab, maxlen=48):
-    
-  in_data = []
-  slot_data = []
-  intent_data = []
+def load_data(in_path,
+              slot_path,
+              intent_path,
+              in_vocab,
+              slot_vocab,
+              intent_vocab,
+              maxlen=48):
+    """Loads the data from the given path and preprocesses the data
+    by converting the tokens into ID's using the vocab dictionary.
+    Additionally, tokens are padded to the maxlen before returning.
 
-  with open(in_path, 'r') as input_fd, \
-    open(intent_path, 'r') as intent_fd, \
-    open(slot_path, 'r') as slot_fd:
-            
-    for ip, intent, slot in zip(input_fd, intent_fd, slot_fd):
-      ip, intent, slot = ip.rstrip(), intent.rstrip(), slot.rstrip()
-      in_data.append(sentenceToIds('__SOS ' + ip + ' __EOS', in_vocab))
-      intent_data.append(sentenceToIds(intent, intent_vocab))
-      slot_data.append(sentenceToIds('__SOS  ' + slot + ' __EOS', slot_vocab))
-      
-  in_data = tf.keras.preprocessing.sequence.pad_sequences(in_data, padding='post', maxlen=maxlen)
-  slot_data = tf.keras.preprocessing.sequence.pad_sequences(slot_data, padding='post', maxlen=maxlen)
-  return in_data, slot_data, intent_data
+    Args:
+    in_path: The path to the file contating the input queries.
+    slot_path: The path to the file contating the slot labels.
+    intent_path: The path to the file contating the intent labels.
+    in_vocab: The vocabulary of the input sentences.
+    slot_vocab: The vocabulary of slot labels.
+    intent_vocab: The vocabulary of intent labels.
 
+    Returns:
+    The preprocesses input data, slot lables and the intents.
+    """
+
+    in_data = []
+    slot_data = []
+    intent_data = []
+
+    with open(in_path, 'r') as input_fd, \
+      open(intent_path, 'r') as intent_fd, \
+      open(slot_path, 'r') as slot_fd:
+
+        for inputs, intent, slot in zip(input_fd, intent_fd, slot_fd):
+            inputs, intent, slot = inputs.rstrip(), intent.rstrip(), slot.rstrip()
+            in_data.append(sentence_to_ids(SOS_TOKEN + inputs + EOS_TOKEN, in_vocab))
+            intent_data.append(sentence_to_ids(intent, intent_vocab))
+            slot_data.append(
+                sentence_to_ids('__SOS  ' + slot + ' __EOS', slot_vocab))
+
+    in_data = tf.keras.preprocessing.sequence.pad_sequences(in_data,
+                                                            padding='post',
+                                                            maxlen=maxlen)
+    slot_data = tf.keras.preprocessing.sequence.pad_sequences(slot_data,
+                                                              padding='post',
+                                                              maxlen=maxlen)
+    return in_data, slot_data, intent_data
 
 
 def create_padding_mask(seq):
-  enc_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
-  # add extra dimensions to add the padding
-  # to the attention logits.
-  enc_mask = enc_mask[:, tf.newaxis, tf.newaxis, :] # (batch_size, 1, 1, seq_len)
-    
-  intent_mask = tf.cast(tf.math.not_equal(seq, 0), tf.float32)
-  intent_mask = intent_mask[:, :, tf.newaxis]
+    """Creates the paddding mask that will be used by the encoder
+    for masking out the padding tokens. It also create the intent
+    mask for masking out the padding tokens in the IntentHead.
 
-  return enc_mask, intent_mask
+    Args:
+    seq: The sequence of inputs to be passed to the model.
+
+    Returns:
+    The encoder mask and the intent mask.
+    """
+
+    enc_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
+    # add extra dimensions to add the padding to the attention logits.
+    enc_mask = enc_mask[:, tf.newaxis,
+                        tf.newaxis, :]  # (batch_size, 1, 1, seq_len)
+
+    intent_mask = tf.cast(tf.math.not_equal(seq, 0), tf.float32)
+    intent_mask = intent_mask[:, :, tf.newaxis]
+
+    return enc_mask, intent_mask
+
 
 def create_look_ahead_mask(size):
-  mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-  return mask  # (seq_len, seq_len)
+    """Generates and returns the look ahead mask of a given size
+    to be used while decoding.
+    """
+
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask  # (seq_len, seq_len)
 
 
-def create_masks(inp, tar):
-  # padding mask same for encoder and decoder
-  padding_mask, intent_mask = create_padding_mask(inp)
-  
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by 
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
-  dec_target_padding_mask, _ = create_padding_mask(tar)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-  
-  return padding_mask, combined_mask, intent_mask
+def create_masks(inputs, target):
+    """Creates all the necessary masks for training.
+
+    Args:
+    inputs: The sequence of inputs to be passed to the model.
+    target: The slot targets to be passed to the decoder.
+
+    Returns:
+    The encoder mask and the intent mask.
+    """
+
+    # padding mask same for encoder and decoder
+    padding_mask, intent_mask = create_padding_mask(inputs)
+
+    # Used in the 1st attention block in the decoder.
+    # It is used to pad and mask future tokens in the input received by
+    # the decoder.
+    look_ahead_mask = create_look_ahead_mask(tf.shape(target)[1])
+    dec_target_padding_mask, _ = create_padding_mask(target)
+    combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+    return padding_mask, combined_mask, intent_mask
 
 
 def compute_semantic_acc(slot_real, intent_real, slot_pred, intent_pred):
-    
-  semantic_acc = (intent_pred == intent_real)
+    """Computes the semantic accuracy of the intent and slot predictions.
+    (The percentage of queries for which both intents and slots were
+    predicted correctly.)
 
-  for idx, (s_pred, s_real) in enumerate(zip(slot_pred, slot_real)):
-    
-    for i in range(len(s_real)):
-      if s_real[i] == 0:
-        break
-      
-      if s_pred[i] != s_real[i]:
-        semantic_acc[idx] = False
-        
-  semantic_acc = semantic_acc.astype(float)
-  semantic_acc = np.mean(semantic_acc) * 100.0
-    
-  return semantic_acc
+    Args:
+    slot_real: The ground truth for the slots.
+    intent_real: The ground through for the intents.
+    slot_pred: The slots predicted by the model.
+    intent_pred: The intents predicted by the model.
 
+    Returns:
+    The sematic accuracy of the predictions.
+    """
 
-def compute_metrics(slot_real, intent_real, slot_pred, intent_pred, slot_vocab):
-  
-  slots_pred_dec = []
-  slots_real_dec = []
+    semantic_acc = (intent_pred == intent_real)
 
-  #decode the predictions and ground truth
-  for s_pred, s_real in zip(slot_pred, slot_real):
-    pred_dec = []
-    real_dec = []
-    
-    for i in range(len(s_real)):
-      if s_real[i] == 0:
-        break
-      
-      pred_dec.append(slot_vocab['rev'][s_pred[i]])
-      real_dec.append(slot_vocab['rev'][s_real[i]])
-        
-    slots_pred_dec.append(pred_dec)
-    slots_real_dec.append(real_dec)
-    
-  # compute all metrics  
-  intent_acc = np.mean((intent_real == intent_pred).astype(np.float))*100.0
-  f1, precision, recall = computeF1Score(slots_real_dec, slots_pred_dec)
-  semantic_acc = compute_semantic_acc(slot_real, intent_real, slot_pred, intent_pred)
-    
-  return intent_acc, semantic_acc, f1, precision, recall
+    for idx, (s_pred, s_real) in enumerate(zip(slot_pred, slot_real)):
 
+        for i in range(len(s_real)):
+            if s_real[i] == 0:
+                break
 
-def evaluate(model, dataset, slot_vocab, max_len=48, sos_token=1):
-  
-  pred_intents = []
-  pred_slots = []
-  gt_intents = []
-  gt_slots = []
+            if s_pred[i] != s_real[i]:
+                semantic_acc[idx] = False
 
-  for (batch, (inp, slots, intents)) in enumerate(dataset):
+    semantic_acc = semantic_acc.astype(float)
+    semantic_acc = np.mean(semantic_acc) * 100.0
 
-    decoder_input = [sos_token] * inp.shape[0]
-    output = tf.expand_dims(decoder_input, 1)
-    
-    for i in range(max_len-1):
-        padding_mask, look_ahead_mask, intent_mask = create_masks(inp, output)
-            
-        predictions, p_intent = model(inp, output, False,
-                                 padding_mask, look_ahead_mask,
-                                 intent_mask)
-        
-        # select the last word from the seq_len dimension
-        predictions = predictions[: ,-1:, :]  # (batch_size, 1, vocab_size)
-        
-        predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
-        
-        output = tf.concat([output, predicted_id], axis=-1)
-        
-        if i==max_len-2:
-          pred_intents.append(tf.argmax(p_intent, axis=-1).numpy())
-        
-    pred_slots.append(output.numpy())
-    gt_slots.append(slots.numpy())
-    gt_intents.append(intents.numpy().squeeze())
-    
-  pred_slots = np.vstack(pred_slots)
-  pred_intents = np.hstack(pred_intents)  
-  gt_slots = np.vstack(gt_slots) 
-  gt_intents = np.hstack(gt_intents)  
-    
-  intent_acc, semantic_acc, f1, _, _ = compute_metrics(gt_slots, gt_intents, pred_slots, pred_intents, slot_vocab)
+    return semantic_acc
 
-  print("Intent Acc {:.4f}, Semantic Acc {:.2f}, F1 score {:.2f}".format(intent_acc, semantic_acc, f1))
+def compute_metrics(slot_real, intent_real, slot_pred, intent_pred,
+                    slot_vocab):
+    """Computes all the relevant metrics for the predictions.
+
+    Args:
+    slot_real: The ground truth for the slots.
+    intent_real: The ground through for the intents.
+    slot_pred: The slots predicted by the model.
+    intent_pred: The intents predicted by the model.
+    slot_vocab: The vocabulary of slot labels.
+
+    Returns:
+    The intent accuracy, semantic accuracy, f1, precision and recall.
+    """
+
+    slots_pred_dec = []
+    slots_real_dec = []
+
+    #decode the predictions and ground truth
+    for s_pred, s_real in zip(slot_pred, slot_real):
+        pred_dec = []
+        real_dec = []
+
+        for i in range(len(s_real)):
+            if s_real[i] == 0:
+                break
+
+            pred_dec.append(slot_vocab['rev'][s_pred[i]])
+            real_dec.append(slot_vocab['rev'][s_real[i]])
+
+        slots_pred_dec.append(pred_dec)
+        slots_real_dec.append(real_dec)
+
+    # compute all metrics
+    intent_acc = np.mean((intent_real == intent_pred).astype(np.float)) * 100.0
+    f1_score, precision, recall = compute_f1(slots_real_dec, slots_pred_dec)
+    semantic_acc = compute_semantic_acc(slot_real, intent_real, slot_pred,
+                                        intent_pred)
+
+    return intent_acc, semantic_acc, f1_score, precision, recall
+
+def evaluate(model, dataset, slot_vocab, max_len=48):
+    """Evaluates the performance of the model on the given dataset and
+    prints out the metrics.
+
+    Args:
+    model: The model to be evaluated.
+    dataset: The dataset on which the model is to be evaluated.
+    slot_vocab: The vocabulary of slot labels.
+    max_len: The number of outputs to be generated by the decoder.
+    """
+
+    pred_intents = []
+    pred_slots = []
+    gt_intents = []
+    gt_slots = []
+
+    for inputs, slots, intents in dataset:
+
+        decoder_input = [slot_vocab['vocab'][SOS_TOKEN]] * inputs.shape[0]
+        output = tf.expand_dims(decoder_input, 1)
+
+        for i in range(max_len - 1):
+            padding_mask, look_ahead_mask, intent_mask = create_masks(
+                inputs, output)
+
+            predictions, p_intent = model(inputs, output, False, padding_mask,
+                                          look_ahead_mask, intent_mask)
+
+            # select the last word from the seq_len dimension
+            predictions = predictions[:, -1:, :]  # (batch_size, 1, vocab_size)
+
+            predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
+
+            output = tf.concat([output, predicted_id], axis=-1)
+
+            if i == max_len - 2:
+                pred_intents.append(tf.argmax(p_intent, axis=-1).numpy())
+
+        pred_slots.append(output.numpy())
+        gt_slots.append(slots.numpy())
+        gt_intents.append(intents.numpy().squeeze())
+
+    pred_slots = np.vstack(pred_slots)
+    pred_intents = np.hstack(pred_intents)
+    gt_slots = np.vstack(gt_slots)
+    gt_intents = np.hstack(gt_intents)
+
+    intent_acc, semantic_acc, f1_score, _, _ = compute_metrics(
+        gt_slots, gt_intents, pred_slots, pred_intents, slot_vocab)
+
+    print("Intent Acc {:.4f}, Semantic Acc {:.2f}, F1 score {:.2f}".format(
+        intent_acc, semantic_acc, f1_score))
 

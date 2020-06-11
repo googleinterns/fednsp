@@ -360,8 +360,7 @@ def load_data(in_path,
       open(slot_path, 'r') as slot_fd:
 
         for inputs, intent, slot in zip(input_fd, intent_fd, slot_fd):
-            inputs, intent, slot = inputs.rstrip(), intent.rstrip(
-            ), slot.rstrip()
+            inputs, intent, slot = inputs.rstrip(), intent.rstrip(), slot.rstrip()
             in_data.append(sentence_to_ids(inputs, in_vocab))
             intent_data.append(sentence_to_ids(intent, intent_vocab))
             slot_data.append(sentence_to_ids(slot, slot_vocab))
@@ -504,9 +503,9 @@ def evaluate(model, dataset, slot_vocab):
     gt_intents = []
     gt_slots = []
 
-    for inp, slots, intents in dataset:
-        enc_padding_mask, slot_mask = create_masks(inp)
-        p_slot, p_intent = model(inp, False, enc_padding_mask, slot_mask)
+    for inputs, slots, intents in dataset:
+        enc_padding_mask, slot_mask = create_masks(inputs)
+        p_slot, p_intent = model(inputs, False, enc_padding_mask, slot_mask)
         pred_slots.append(tf.argmax(p_slot, axis=-1).numpy())
         pred_intents.append(tf.argmax(p_intent, axis=-1).numpy())
         gt_slots.append(slots.numpy())

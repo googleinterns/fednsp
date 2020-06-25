@@ -20,7 +20,7 @@ import tensorflow_federated as tff
 from tensorflow import keras
 
 from model_layers import Encoder, Decoder, SlotHead, IntentHead
-from util import load_data, create_vocabulary, load_vocabulary, create_masks
+from util import load_data, create_vocabulary, load_vocabulary, create_masks, evaluate
 
 tf.compat.v1.enable_v2_behavior()
 
@@ -104,6 +104,14 @@ def parse_arguments():
                         type=str,
                         default='label',
                         help='Intent file name.')
+    parser.add_argument('--logdir',
+                        type=str,
+                        default='./logs/scalars/',
+                        help='Directory to save the scalar logs into.')  
+    parser.add_argument('--clients_per_round',
+                    type=int,
+                    default=5,
+                    help='NUmber of clients for each round update.')                        
 
     arg = parser.parse_args()
 
@@ -186,27 +194,21 @@ def create_keras_model(arg,
                        input_vocab_size,
                        slot_vocab_size,
                        intent_vocab_size,
-                       pe_max=64):
+                       pe_max=64,
+                       training=True):
 
-    sent_input = keras.layers.Input(shape=(arg.max_seq_len, ))
-    slot_input = keras.layers.Input(shape=(arg.max_seq_len - 1, ))
-    padding_mask = keras.layers.Input(shape=(
-        1,
-        1,
-        arg.max_seq_len,
-    ))
-    look_ahead_mask = keras.layers.Input(shape=(
-        1,
-        arg.max_seq_len - 1,
-        arg.max_seq_len - 1,
-    ))
-    intent_mask = keras.layers.Input(shape=(arg.max_seq_len, 1))
+    sent_input = keras.layers.Input(shape=(None,))
+    slot_input =  keras.layers.Input(shape=(None,))
+    padding_mask = keras.layers.Input(shape=(1, 1, None,))
+    look_ahead_mask = keras.layers.Input(shape=(1, None, None,))
+    intent_mask = keras.layers.Input(shape=(None,1))
+    
 
     encoder = Encoder(arg.num_layers, arg.d_model, arg.num_heads, arg.dff,
-                      input_vocab_size, pe_max, arg.rate)
+                      input_vocab_size, pe_max, arg.rate, training)
 
     decoder = Decoder(arg.num_layers, arg.d_model, arg.num_heads, arg.dff,
-                      slot_vocab_size, pe_max, arg.rate)
+                      slot_vocab_size, pe_max, arg.rate, training)
 
     intent_head = IntentHead(intent_vocab_size, arg.d_model, arg.max_seq_len)
 
@@ -233,7 +235,7 @@ def create_keras_model(arg,
 
 def preprocess(dataset, arg):
     return (dataset.shuffle(BUFFER_SIZE).batch(arg.batch_size,
-                                               drop_remainder=True))
+                                               drop_remainder=False))
 
 
 def make_federated_data(client_data, client_ids, arg):
@@ -285,6 +287,142 @@ def create_tff_model(arg, input_vocab_size, slot_vocab_size, intent_vocab_size,
             tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         ])
 
+def generate_iid_splits(in_data, slot_data, intent_data, num_clients=10):
+  
+    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
+    padding_masks, look_ahead_masks, intent_masks = create_masks(in_data, slot_targets)
+
+    ftrain_data = collections.OrderedDict()
+    instances_per_client = len(in_data)//num_clients
+
+    shuffled_idxs = np.arange(len(in_data))
+    np.random.shuffle(shuffled_idxs)
+
+    for i in range(num_clients):
+      client_idxs = shuffled_idxs[i*instances_per_client:(i+1)*instances_per_client]
+      client_data = collections.OrderedDict(x=(tf.gather(in_data, client_idxs, axis=0),
+                                               tf.gather(slot_inputs, client_idxs, axis=0),
+                                               tf.gather(padding_masks, client_idxs, axis=0),
+                                               tf.gather(look_ahead_masks, client_idxs, axis=0),
+                                               tf.gather(intent_masks, client_idxs, axis=0)),
+                                            y=(tf.gather(slot_targets, client_idxs, axis=0),
+                                               tf.gather(intent_data, client_idxs, axis=0)))
+      ftrain_data[str(i)] = client_data
+
+    ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
+
+    return ftrain_data
+
+def generate_splits_type1(in_data, slot_data, intent_data, num_clients=10):
+  
+    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
+    padding_masks, look_ahead_masks, intent_masks = create_masks(in_data, slot_targets)
+
+    ftrain_data = collections.OrderedDict()
+
+    idxs = np.arange(len(in_data))
+    unique_intents = np.unique(intent_data)
+    
+    client_idxs = collections.defaultdict(list)
+    
+    for intent_id in unique_intents:
+        
+        intent_client_distribution = np.random.randint(low=0, high=1000, size=num_clients).astype(np.float)
+        intent_client_distribution /= np.sum(intent_client_distribution)
+        
+        intent_idxs = np.where(np.array(intent_data).squeeze() == intent_id)[0]
+        
+        client_idx_distribution = np.random.multinomial(1, intent_client_distribution, size=len(intent_idxs))
+        client_idx_distribution = np.argmax(client_idx_distribution, axis=1)
+        
+        for client_id in range(num_clients):
+            client_idxs[client_id] += intent_idxs[(client_idx_distribution == client_id)].tolist()
+
+    for i in range(num_clients):
+      client_idx = client_idxs[i]
+      client_data = collections.OrderedDict(x=(tf.gather(in_data, client_idx, axis=0),
+                                               tf.gather(slot_inputs, client_idx, axis=0),
+                                               tf.gather(padding_masks, client_idx, axis=0),
+                                               tf.gather(look_ahead_masks, client_idx, axis=0),
+                                               tf.gather(intent_masks, client_idx, axis=0)),
+                                            y=(tf.gather(slot_targets, client_idx, axis=0),
+                                               tf.gather(intent_data, client_idx, axis=0)))
+      ftrain_data[str(i)] = client_data
+
+    ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
+
+    return ftrain_data
+
+def generate_splits_type2(in_data, slot_data, intent_data, instance_types_per_client=1):
+  
+    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
+    padding_masks, look_ahead_masks, intent_masks = create_masks(in_data, slot_targets)
+
+    ftrain_data = collections.OrderedDict()
+
+    idxs = np.arange(len(in_data))
+    unique_intents = np.unique(intent_data)
+    np.random.shuffle(unique_intents)
+    
+    num_clients = int(np.ceil(len(unique_intents)/float(instance_types_per_client)))
+    
+    client_idxs = collections.defaultdict(list)
+    
+    for client_id in range(num_clients):
+        
+        intent_ids = unique_intents[client_id*instance_types_per_client:(client_id+1)*instance_types_per_client]
+        
+        for intent_id in intent_ids:
+            intent_idxs = np.where(np.array(intent_data).squeeze() == intent_id)[0]
+            client_idxs[client_id] += intent_idxs.tolist()
+        
+    for i in range(num_clients):
+      client_idx = client_idxs[i]
+      client_data = collections.OrderedDict(x=(tf.gather(in_data, client_idx, axis=0),
+                                               tf.gather(slot_inputs, client_idx, axis=0),
+                                               tf.gather(padding_masks, client_idx, axis=0),
+                                               tf.gather(look_ahead_masks, client_idx, axis=0),
+                                               tf.gather(intent_masks, client_idx, axis=0)),
+                                            y=(tf.gather(slot_targets, client_idx, axis=0),
+                                               tf.gather(intent_data, client_idx, axis=0)))
+      ftrain_data[str(i)] = client_data
+
+    ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
+
+    return ftrain_data, num_clients
+
+
+def manage_checkpoints(model, path, logdir):
+    """Defines the checkpoint manager and loads the latest
+    checkpoint if it exists.
+    Args:
+    model: An instace of the tensorflow model.
+    path: The path in which the checkpoint has to be saved.
+    Returns:
+    The checkpoint manager which is used to save the model.
+    """
+
+    checkpoint = tf.train.Checkpoint(model=model)
+
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint,
+                                                    path,
+                                                    max_to_keep=None)
+
+    # if a checkpoint exists, restore the latest checkpoint.
+    # if checkpoint_manager.latest_checkpoint:
+    #     checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    #     print('Latest checkpoint restored!!')
+
+    summary_writer = tf.summary.create_file_writer(logdir)
+
+    return checkpoint_manager, summary_writer
+
+def eval(state, local_model, valid_dataset, slot_vocab):
+
+  # keras_model.compile(
+  #     loss=[masked_slot_loss, tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)])
+  tff.learning.assign_weights_to_keras_model(local_model, state.model)
+  return evaluate(local_model, valid_dataset, slot_vocab)
 
 def main():
     """Runs the entire pipelone from loading the data and defining the model
@@ -299,59 +437,69 @@ def main():
     train_in_data, train_slot_data, train_intent_data = load_dataset(
         arg, arg.train_data_path, in_vocab, slot_vocab, intent_vocab)
 
-    # valid_in_data, valid_slot_data, valid_intent_data = load_dataset(
-    #     arg, arg.valid_data_path, in_vocab, slot_vocab, intent_vocab)
+    valid_in_data, valid_slot_data, valid_intent_data = load_dataset(
+        arg, arg.valid_data_path, in_vocab, slot_vocab, intent_vocab)
 
-    # test_in_data, test_slot_data, test_intent_data = load_dataset(
-    #     arg, arg.test_data_path, in_vocab, slot_vocab, intent_vocab)
+    test_in_data, test_slot_data, test_intent_data = load_dataset(
+        arg, arg.test_data_path, in_vocab, slot_vocab, intent_vocab)
 
-    targets = train_slot_data[:, 1:]
-    padding_masks, look_ahead_masks, intent_masks = create_masks(
-        train_in_data, targets)
+    valid_dataset = tf.data.Dataset.from_tensor_slices((valid_in_data, valid_slot_data, valid_intent_data))
+    valid_dataset = valid_dataset.batch(512, drop_remainder=False)
 
-    num_clients = 10
-    ftrain_data = collections.OrderedDict()
-    instance_per_client = len(train_in_data) // num_clients
+    test_dataset = tf.data.Dataset.from_tensor_slices((test_in_data, test_slot_data, test_intent_data))
+    test_dataset = test_dataset.batch(512, drop_remainder=False)  
 
-    for i in range(num_clients):
-        client_data = collections.OrderedDict(
-            x=(train_in_data[i * instance_per_client:(i + 1) *
-                             instance_per_client],
-               train_slot_data[i * instance_per_client:(i + 1) *
-                               instance_per_client, 1:],
-               padding_masks[i * instance_per_client:(i + 1) *
-                             instance_per_client],
-               look_ahead_masks[i * instance_per_client:(i + 1) *
-                                instance_per_client],
-               intent_masks[i * instance_per_client:(i + 1) *
-                            instance_per_client]),
-            y=(targets[i * instance_per_client:(i + 1) * instance_per_client],
-               train_intent_data[i * instance_per_client:(i + 1) *
-                                 instance_per_client]))
-        ftrain_data[str(i)] = client_data
 
-    ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
+    ftrain_data, num_clients = generate_splits_type2(train_in_data, train_slot_data, train_intent_data, 2)
+
+    local_model = create_keras_model(arg,  len(in_vocab['vocab']), len(slot_vocab['vocab']),
+            len(intent_vocab['vocab']), training=False)
+    
+    checkpoint_manager, summary_writer = manage_checkpoints(
+        local_model, os.path.join('./checkpoints/type2_2'), arg.logdir)
+
+    summary_writer.set_as_default()
 
     raw_example_dataset = ftrain_data.create_tf_dataset_for_client('1')
     example_dataset = preprocess(raw_example_dataset, arg)
-    print(example_dataset.element_spec)
 
-    ftrain_data = make_federated_data(ftrain_data, np.arange(10), arg)
+    
 
     iterative_process = tff.learning.build_federated_averaging_process(
         lambda: create_tff_model(
             arg, len(in_vocab['vocab']), len(slot_vocab['vocab']),
             len(intent_vocab['vocab']), example_dataset.element_spec),
-        client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=0.02
+        client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=0.1
                                                             ),
         server_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=1.0))
 
     state = iterative_process.initialize()
 
-    num_rounds = 10
-    for round_num in range(2, num_rounds):
-        state, metrics = iterative_process.next(state, ftrain_data)
+    NUM_ROUNDS = 300
+    best_validation_acc = 0.0
+
+    for round_num in range(1, NUM_ROUNDS):
+        # Sample a subset of clients to be used for this round
+        # client_subset = np.random.choice(num_clients, num_clients, replace=False)
+        # print(client_subset)
+        ftrain_data_subset = make_federated_data(ftrain_data, np.arange(num_clients), arg)
+
+        state, metrics = iterative_process.next(state, ftrain_data_subset)
+        semantic_acc, intent_acc, f1_score = eval(state, local_model, valid_dataset, slot_vocab)
+
+        tf.summary.scalar('Train loss', metrics._asdict()['loss'], step=round_num)
+        tf.summary.scalar('Validation Semantic Accuracy', semantic_acc, step=round_num)
+        tf.summary.scalar('Validation f1 Score', f1_score, step=round_num)
+        tf.summary.scalar('Validation Intent Accuracy', intent_acc, step=round_num)
+
+        if semantic_acc > best_validation_acc:
+            best_validation_acc = semantic_acc
+            checkpoint_save_path = checkpoint_manager.save()
+            print('Saving checkpoint for epoch {} at {}'.format(
+                round_num, checkpoint_save_path))
+
         print('round {:2d}, metrics={}'.format(round_num, metrics))
+
 
 
 if __name__ == '__main__':

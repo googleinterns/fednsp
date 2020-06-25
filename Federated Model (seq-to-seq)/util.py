@@ -520,8 +520,8 @@ def evaluate(model, dataset, slot_vocab, max_len=48):
             padding_mask, look_ahead_mask, intent_mask = create_masks(
                 inputs, output)
 
-            predictions, p_intent = model(inputs, output, False, padding_mask,
-                                          look_ahead_mask, intent_mask)
+            predictions, p_intent = model((inputs, output, padding_mask,
+                                          look_ahead_mask, intent_mask))
 
             # select the last word from the seq_len dimension
             predictions = predictions[:, -1:, :]  # (batch_size, 1, vocab_size)
@@ -547,3 +547,5 @@ def evaluate(model, dataset, slot_vocab, max_len=48):
 
     print("Intent Acc {:.4f}, Semantic Acc {:.2f}, F1 score {:.2f}".format(
         intent_acc, semantic_acc, f1_score))
+
+    return semantic_acc, intent_acc, f1_score

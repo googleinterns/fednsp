@@ -130,7 +130,8 @@ def pad_sentence(sequence, max_length, vocab):
     The sentence padded with padding token.
     """
 
-    return sequence + [vocab['vocab'][PADDING_TOKEN]] * (max_length - len(sequence))
+    return sequence + [vocab['vocab'][PADDING_TOKEN]
+                       ] * (max_length - len(sequence))
 
 
 # compute f1 score is modified from conlleval.pl
@@ -153,15 +154,6 @@ def start_of_chunk(prev_tag, tag, prev_tag_type, tag_type, chunk_start=False):
     if prev_tag == 'I' and tag == 'B':
         chunk_start = True
     if prev_tag == 'O' and tag == 'B':
-        chunk_start = True
-    if prev_tag == 'O' and tag == 'I':
-        chunk_start = True
-
-    if prev_tag == 'E' and tag == 'E':
-        chunk_start = True
-    if prev_tag == 'E' and tag == 'I':
-        chunk_start = True
-    if prev_tag == 'O' and tag == 'E':
         chunk_start = True
     if prev_tag == 'O' and tag == 'I':
         chunk_start = True
@@ -190,15 +182,6 @@ def end_of_chunk(prev_tag, tag, prev_tag_type, tag_type, chunk_end=False):
     if prev_tag == 'B' and tag == 'O':
         chunk_end = True
     if prev_tag == 'I' and tag == 'B':
-        chunk_end = True
-    if prev_tag == 'I' and tag == 'O':
-        chunk_end = True
-
-    if prev_tag == 'E' and tag == 'E':
-        chunk_end = True
-    if prev_tag == 'E' and tag == 'I':
-        chunk_end = True
-    if prev_tag == 'E' and tag == 'O':
         chunk_end = True
     if prev_tag == 'I' and tag == 'O':
         chunk_end = True
@@ -253,42 +236,45 @@ def compute_f1(correct_slots, pred_slots):
             correct_tag, correct_type = split_tag_type(c)
             pred_tag, pred_type = split_tag_type(p)
 
+            correct_end_of_chunk = end_of_chunk(last_correct_tag, correct_tag,
+                                                last_correct_type,
+                                                correct_type)
+            pred_end_of_chunk = end_of_chunk(last_pred_tag, pred_tag,
+                                             last_pred_type, pred_type)
+
+            correct_start_of_chunk = start_of_chunk(last_correct_tag,
+                                                    correct_tag,
+                                                    last_correct_type,
+                                                    correct_type)
+            pred_start_of_chunk = start_of_chunk(last_pred_tag, pred_tag,
+                                                 last_pred_type, pred_type)
+
             if in_correct:
-                if end_of_chunk(last_correct_tag, correct_tag,
-                                last_correct_type, correct_type) and \
-                                end_of_chunk(last_pred_tag, pred_tag,
-                                             last_pred_type, pred_type) and \
-                                    (last_correct_type == last_pred_type):
+                if correct_end_of_chunk and pred_end_of_chunk and \
+                        (last_correct_type == last_pred_type):
                     in_correct = False
                     correct_chunk_cnt += 1
                     if last_correct_type in correct_chunk:
                         correct_chunk[last_correct_type] += 1
                     else:
                         correct_chunk[last_correct_type] = 1
-                elif end_of_chunk(last_correct_tag, correct_tag,
-                                  last_correct_type, correct_type) != \
-                                  end_of_chunk(last_pred_tag, pred_tag,
-                                               last_pred_type, pred_type) or \
+
+                elif correct_end_of_chunk != pred_end_of_chunk or \
                                      (correct_type != pred_type):
                     in_correct = False
 
-            if start_of_chunk(last_correct_tag, correct_tag,
-                              last_correct_type, correct_type) and \
-                                start_of_chunk(last_pred_tag, pred_tag,
-                                               last_pred_type, pred_type) and \
-                                    (correct_type == pred_type):
+            if correct_start_of_chunk and pred_start_of_chunk and \
+                    (correct_type == pred_type):
                 in_correct = True
 
-            if start_of_chunk(last_correct_tag, correct_tag, last_correct_type,
-                              correct_type):
+            if correct_start_of_chunk:
                 found_correct_cnt += 1
                 if correct_type in found_correct:
                     found_correct[correct_type] += 1
                 else:
                     found_correct[correct_type] = 1
 
-            if start_of_chunk(last_pred_tag, pred_tag, last_pred_type,
-                              pred_type):
+            if pred_start_of_chunk:
                 found_pred_cnt += 1
                 if pred_type in found_pred:
                     found_pred[pred_type] += 1
@@ -362,8 +348,10 @@ def load_data(in_path,
       open(slot_path, 'r') as slot_fd:
 
         for inputs, intent, slot in zip(input_fd, intent_fd, slot_fd):
-            inputs, intent, slot = inputs.rstrip(), intent.rstrip(), slot.rstrip()
-            in_data.append(sentence_to_ids(SOS_TOKEN + inputs + EOS_TOKEN, in_vocab))
+            inputs, intent, slot = inputs.rstrip(), intent.rstrip(
+            ), slot.rstrip()
+            in_data.append(
+                sentence_to_ids(SOS_TOKEN + inputs + EOS_TOKEN, in_vocab))
             intent_data.append(sentence_to_ids(intent, intent_vocab))
             slot_data.append(
                 sentence_to_ids('__SOS  ' + slot + ' __EOS', slot_vocab))
@@ -464,6 +452,7 @@ def compute_semantic_acc(slot_real, intent_real, slot_pred, intent_pred):
 
     return semantic_acc
 
+
 def compute_metrics(slot_real, intent_real, slot_pred, intent_pred,
                     slot_vocab):
     """Computes all the relevant metrics for the predictions.
@@ -504,6 +493,7 @@ def compute_metrics(slot_real, intent_real, slot_pred, intent_pred,
                                         intent_pred)
 
     return intent_acc, semantic_acc, f1_score, precision, recall
+
 
 def evaluate(model, dataset, slot_vocab, max_len=48):
     """Evaluates the performance of the model on the given dataset and
@@ -557,4 +547,3 @@ def evaluate(model, dataset, slot_vocab, max_len=48):
 
     print("Intent Acc {:.4f}, Semantic Acc {:.2f}, F1 score {:.2f}".format(
         intent_acc, semantic_acc, f1_score))
-

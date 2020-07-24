@@ -121,6 +121,8 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         self.dense = tf.keras.layers.Dense(d_model)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({'d_model': self.d_model, 'num_heads': self.num_heads})
         return config
@@ -201,14 +203,13 @@ class EncoderLayer(tf.keras.layers.Layer):
             transformer.
         rate: The dropout rate to be used.
     """
-    def __init__(self, d_model, num_heads, dff, rate=0.1, training=True):
+    def __init__(self, d_model, num_heads, dff, rate=0.1):
         super(EncoderLayer, self).__init__()
 
         self.d_model = d_model
         self.num_heads = num_heads
         self.dff = dff
         self.rate = rate
-        self.training = training
 
         self.mha = MultiHeadAttention(self.d_model, self.num_heads)
         self.ffn = point_wise_feed_forward_network(self.d_model, self.dff)
@@ -220,28 +221,29 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.dropout2 = tf.keras.layers.Dropout(self.rate)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({
             'd_model': self.d_model,
             'num_heads': self.num_heads,
             'dff': self.dff,
             'rate': self.rate,
-            'training': self.training
         })
         return config
 
-    def call(self, inputs, mask):
+    def call(self, inputs, mask, training=True):
         """Forward pass for the Encoder layer.
       """
 
         attn_output, _ = self.mha(inputs, inputs, inputs,
                                   mask)  # (batch_size, input_seq_len, d_model)
-        attn_output = self.dropout1(attn_output, training=self.training)
+        attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(
             inputs + attn_output)  # (batch_size, input_seq_len, d_model)
 
         ffn_output = self.ffn(out1)  # (batch_size, input_seq_len, d_model)
-        ffn_output = self.dropout2(ffn_output, training=self.training)
+        ffn_output = self.dropout2(ffn_output, training=training)
         out2 = self.layernorm2(
             out1 + ffn_output)  # (batch_size, input_seq_len, d_model)
 
@@ -261,14 +263,13 @@ class DecoderLayer(tf.keras.layers.Layer):
             transformer.
         rate: The dropout rate to be used.
     """
-    def __init__(self, d_model, num_heads, dff, rate=0.1, training=True):
+    def __init__(self, d_model, num_heads, dff, rate=0.1):
         super(DecoderLayer, self).__init__()
 
         self.d_model = d_model
         self.num_heads = num_heads
         self.dff = dff
         self.rate = rate
-        self.training = training
 
         self.mha1 = MultiHeadAttention(self.d_model, self.num_heads)
         self.mha2 = MultiHeadAttention(self.d_model, self.num_heads)
@@ -284,13 +285,14 @@ class DecoderLayer(tf.keras.layers.Layer):
         self.dropout3 = tf.keras.layers.Dropout(self.rate)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({
             'd_model': self.d_model,
             'num_heads': self.num_heads,
             'dff': self.dff,
             'rate': self.rate,
-            'training': self.training
         })
         return config
 
@@ -298,25 +300,26 @@ class DecoderLayer(tf.keras.layers.Layer):
              inputs,
              enc_output,
              look_ahead_mask,
-             padding_mask):
+             padding_mask,
+             training=True):
         """Forward pass for the Decoder layer.
       """
 
         attn1, attn_weights_block1 = self.mha1(
             inputs, inputs, inputs,
             look_ahead_mask)  # (batch_size, target_seq_len, d_model)
-        attn1 = self.dropout1(attn1, training=self.training)
+        attn1 = self.dropout1(attn1, training=training)
         out1 = self.layernorm1(attn1 + inputs)
 
         attn2, attn_weights_block2 = self.mha2(
             enc_output, enc_output, out1,
             padding_mask)  # (batch_size, target_seq_len, d_model)
-        attn2 = self.dropout2(attn2, training=self.training)
+        attn2 = self.dropout2(attn2, training=training)
         out2 = self.layernorm2(attn2 +
                                out1)  # (batch_size, target_seq_len, d_model)
 
         ffn_output = self.ffn(out2)  # (batch_size, target_seq_len, d_model)
-        ffn_output = self.dropout3(ffn_output, training=self.training)
+        ffn_output = self.dropout3(ffn_output, training=training)
         out3 = self.layernorm3(ffn_output +
                                out2)  # (batch_size, target_seq_len, d_model)
 
@@ -347,8 +350,7 @@ class Encoder(tf.keras.layers.Layer):
                  dff,
                  input_vocab_size,
                  maximum_position_encoding,
-                 rate=0.1,
-                 training=True):
+                 rate=0.1):
         super(Encoder, self).__init__()
 
         self.num_layers = num_layers
@@ -358,7 +360,6 @@ class Encoder(tf.keras.layers.Layer):
         self.input_vocab_size = input_vocab_size
         self.maximum_position_encoding = maximum_position_encoding
         self.rate = rate
-        self.training = training
 
         self.embedding = tf.keras.layers.Embedding(input_vocab_size, d_model)
         self.pos_encoding = positional_encoding(maximum_position_encoding,
@@ -372,6 +373,8 @@ class Encoder(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(rate)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({
             'num_layers': self.num_layers,
@@ -381,11 +384,10 @@ class Encoder(tf.keras.layers.Layer):
             'input_vocab_size': self.input_vocab_size,
             'maximum_position_encoding': self.maximum_position_encoding,
             'rate': self.rate,
-            'training': self.training
         })
         return config
 
-    def call(self, inputs, mask):
+    def call(self, inputs, mask, training=True):
         """Forward pass for the Encoder.
       """
 
@@ -396,7 +398,7 @@ class Encoder(tf.keras.layers.Layer):
         inputs *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
         inputs += self.pos_encoding[:, :seq_len, :]
 
-        outputs = self.dropout(inputs, training=self.training)
+        outputs = self.dropout(inputs, training=training)
 
         for i in range(self.num_layers):
             outputs = self.enc_layers[i](outputs, mask)
@@ -428,8 +430,7 @@ class Decoder(tf.keras.layers.Layer):
                  dff,
                  target_vocab_size,
                  maximum_position_encoding,
-                 rate=0.1,
-                 training=True):
+                 rate=0.1):
         super(Decoder, self).__init__()
 
         self.num_layers = num_layers
@@ -439,7 +440,6 @@ class Decoder(tf.keras.layers.Layer):
         self.target_vocab_size = target_vocab_size
         self.maximum_position_encoding = maximum_position_encoding
         self.rate = rate
-        self.training = training
 
         self.embedding = tf.keras.layers.Embedding(target_vocab_size, d_model)
         self.pos_encoding = positional_encoding(maximum_position_encoding,
@@ -452,6 +452,8 @@ class Decoder(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(rate)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({
             'num_layers': self.num_layers,
@@ -461,7 +463,6 @@ class Decoder(tf.keras.layers.Layer):
             'target_vocab_size': self.target_vocab_size,
             'maximum_position_encoding': self.maximum_position_encoding,
             'rate': self.rate,
-            'training': self.training
         })
         return config
 
@@ -469,18 +470,20 @@ class Decoder(tf.keras.layers.Layer):
              inputs,
              enc_output,
              look_ahead_mask,
-             padding_mask):
+             padding_mask,
+             training=True):
         """Forward pass for the Decoder.
       """
 
         seq_len = tf.shape(inputs)[1]
         attention_weights = {}
 
-        inputs = self.embedding(inputs)  # (batch_size, target_seq_len, d_model)
+        inputs = self.embedding(
+            inputs)  # (batch_size, target_seq_len, d_model)
         inputs *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
         inputs += self.pos_encoding[:, :seq_len, :]
 
-        outputs = self.dropout(inputs, training=self.training)
+        outputs = self.dropout(inputs, training=training)
 
         for i in range(self.num_layers):
             outputs, block1, block2 = self.dec_layers[i](outputs, enc_output,
@@ -509,6 +512,8 @@ class SlotHead(tf.keras.layers.Layer):
         self.slot_layer = tf.keras.layers.Dense(slot_vocab_size)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({'slot_vocab_size': self.slot_vocab_size})
         return config
@@ -542,6 +547,8 @@ class IntentHead(tf.keras.layers.Layer):
         self.intent_layer = tf.keras.layers.Dense(intent_vocab_size)
 
     def get_config(self):
+        """Creates config for this layer.
+        """
         config = super().get_config().copy()
         config.update({
             'intent_vocab_size': self.intent_vocab_size,

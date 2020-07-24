@@ -1,137 +1,105 @@
-"""This file defines the utils for the model.
+"""This file defines the utils for the model traning.
 
-This file contains helper functions used by train_model.py. It defines
-function for creating the vocabulary and loading and preprocessing the
-dataset. Additionally, it contains functions to compute certain
-metrics like F1 score, sentence-level semantic frame accuracy, etc.
+This file contains functions to compute the loss
+and metrics to bes used while training including
+functions to compute the F1 score and
+sentence-level semantic frame accuracy, etc.
+
 Some of the code was in this file was taken from
 https://github.com/ZephyrChenzf/SF-ID-Network-For-NLU/blob/master/utils.py
-
 """
 
 import tensorflow as tf
 import numpy as np
 
-PADDING_TOKEN = '__PAD'
-UNK_TOKEN = '__UNK'
+from data_utils import create_masks
+
 SOS_TOKEN = '__SOS'
-EOS_TOKEN = '__EOS'
 
 
-def create_vocabulary(input_path, output_path, no_pad=False, no_unk=False):
-    """Creates the vocabulary by parsing the given data ans saves it in
-    the output path.
-
-    Args:
-    input_path: The path to the corpus for which vocabulary has to be built.
-    output_path: The path to which the vocabulary has to be saved.
-    no_pad: A boolean variable to indicate if a padding token is to be
-        added to the vocabulary.
-    no_unk: A boolean variable to indicate if a unknown token is to be
-        added to the vocabulary.
-    """
-    if not isinstance(input_path, str):
-        raise TypeError('input_path should be string')
-
-    if not isinstance(output_path, str):
-        raise TypeError('output_path should be string')
-
-    vocab = {}
-    with open(input_path, 'r') as fd, \
-            open(output_path, 'w+') as out:
-
-        for line in fd:
-            line = line.rstrip('\r\n')
-            words = line.split()
-
-            for word in words:
-                if word == UNK_TOKEN:
-                    pass
-                if str.isdigit(word):
-                    word = '0'
-                if word in vocab:
-                    vocab[word] += 1
-                else:
-                    vocab[word] = 1
-        if not no_pad:
-            vocab = [PADDING_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + sorted(
-                vocab, key=vocab.get, reverse=True)
-        else:
-            vocab = [UNK_TOKEN] + sorted(vocab, key=vocab.get, reverse=True)
-        for vocab_word in vocab:
-            out.write(vocab_word + '\n')
-
-
-def load_vocabulary(path):
-    """Loads the vocabulary from the given path and constructs a dictionary for
-    mapping of vocabulary to numerical ID's as well as a list for the reverse
-    mapping.
+def masked_slot_loss(y_true, y_pred):
+    """Defines the loss function to be used while training the model.
+    The loss is defined as the sum of the intent loss and the slot loss
+    per token. Masking is used to not compute the loss on the padding tokens.
 
     Args:
-    path: The path from which the vocabulary has to be loaded.
+    slot_real: The ground truth for the slots.
+    intent_real: The ground through for the intents.
+    slot_pred: The slots predicted by the model.
+    intent_pred: The intents predicted by the model.
+    intent_loss_objective: The objective used to compute the intent loss.
+    slot_loss_objective: The objective used to compute the slot loss.
 
     Returns:
-    A dictionary of forward and reverse mappings.
+    The total loss.
     """
+    loss_objective = tf.keras.losses.SparseCategoricalCrossentropy(
+        from_logits=True, reduction='none')
+    mask = tf.math.logical_not(tf.math.equal(y_true, 0))
+    slot_losses = loss_objective(y_true, y_pred)
 
-    if not isinstance(path, str):
-        raise TypeError('path should be a string')
+    mask = tf.cast(mask, dtype=slot_losses.dtype)
+    slot_losses *= mask
+    slot_loss = tf.reduce_sum(slot_losses) / tf.reduce_sum(mask)
 
-    vocab = []
-    rev = []
-    with open(path) as fd:
-        for line in fd:
-            line = line.rstrip('\r\n')
-            rev.append(line)
-        vocab = dict([(x, y) for (y, x) in enumerate(rev)])
-
-    return {'vocab': vocab, 'rev': rev}
+    return slot_loss
 
 
-def sentence_to_ids(data, vocab):
-    """Converts the given sentence to a list of integers based on the
-    vocabulary mappings.
-
-    Args:
-    data: The sentence to be converted into a list of ID's.
-    vocab: The vocabulary returned by load_vocabulary().
-
-    Returns:
-    The list of integers corresponding to the input sentence.
+class IntentAccuracy(tf.keras.metrics.SparseCategoricalAccuracy):
+    """Class defines the intent accuracy metric to be used
+    for the given task.
     """
+    def __init__(self, name='intent_accuracy', dtype=tf.float32):
+        super().__init__(name, dtype=dtype)
 
-    if not isinstance(vocab, dict):
-        raise TypeError('vocab should be a dict that contains vocab and rev')
-    vocab = vocab['vocab']
-    if isinstance(data, str):
-        words = data.split()
-    elif isinstance(data, list):
-        words = data
-    else:
-        raise TypeError('data should be a string or a list contains words')
-
-    ids = []
-    for word in words:
-        if str.isdigit(word):
-            word = '0'
-        ids.append(vocab.get(word, vocab[UNK_TOKEN]))
-    return ids
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        return super().update_state(y_true[1], y_pred[1], sample_weight)
 
 
-def pad_sentence(sequence, max_length, vocab):
-    """Pads the given sentence to max_length by adding padding tokens.
-
-    Args:
-    sequence: The sentence to be padded.
-    max_length: The length of the sentence after padding.
-    vocab:  The vocabulary returned by load_vocabulary().
-
-    Returns:
-    The sentence padded with padding token.
+class IntentSlotAccuracy(tf.keras.metrics.Metric):
+    """Class defines the intent + slot accuracy metric to be used
+    for the given task.
     """
+    def __init__(self,
+                 name='intent_slot_accuracy',
+                 **kwargs):
+        super(IntentSlotAccuracy, self).__init__(name=name, **kwargs)
+        self.true_positives = self.add_weight(name='tp', initializer='zeros')
+        self.total = self.add_weight(name='tp', initializer='zeros')
 
-    return sequence + [vocab['vocab'][PADDING_TOKEN]
-                       ] * (max_length - len(sequence))
+    def update_state(self, y_true, y_pred, sample_weight=None):
+
+        slot_mask = tf.cast(tf.math.logical_not(tf.math.equal(y_true[0], 0)),
+                            tf.int32)
+        slot_tp = tf.cast(
+            tf.math.equal(
+                y_true[0],
+                tf.math.argmax(y_pred[0], axis=-1, output_type=tf.int32)),
+            tf.int32)
+
+        slot_accuracy = tf.math.reduce_sum(tf.math.multiply(
+            slot_tp, slot_mask),
+                                           axis=-1)
+        slot_accuracy = tf.math.equal(slot_accuracy,
+                                      tf.math.reduce_sum(slot_mask, axis=-1))
+
+        intent_tp = tf.math.equal(
+            y_true[1][:, 0],
+            tf.math.argmax(y_pred[1], axis=-1, output_type=tf.int32))
+        tp = tf.reduce_sum(
+            tf.cast(tf.math.logical_and(slot_accuracy, intent_tp), tf.float32))
+
+        total = tf.reduce_sum(tf.ones_like(y_true[1], dtype=tf.float32))
+
+        self.true_positives.assign_add(tp)
+        self.total.assign_add(total)
+
+    def result(self):
+        return tf.math.divide(self.true_positives, self.total)
+
+    def reset_states(self):
+        self.true_positives.assign(0)
+        self.total.assign(0)
 
 
 # compute f1 score is modified from conlleval.pl
@@ -316,111 +284,6 @@ def compute_f1(correct_slots, pred_slots):
     return f1_score, precision, recall
 
 
-def load_data(in_path,
-              slot_path,
-              intent_path,
-              in_vocab,
-              slot_vocab,
-              intent_vocab,
-              maxlen=48):
-    """Loads the data from the given path and preprocesses the data
-    by converting the tokens into ID's using the vocab dictionary.
-    Additionally, tokens are padded to the maxlen before returning.
-
-    Args:
-    in_path: The path to the file contating the input queries.
-    slot_path: The path to the file contating the slot labels.
-    intent_path: The path to the file contating the intent labels.
-    in_vocab: The vocabulary of the input sentences.
-    slot_vocab: The vocabulary of slot labels.
-    intent_vocab: The vocabulary of intent labels.
-
-    Returns:
-    The preprocesses input data, slot lables and the intents.
-    """
-
-    in_data = []
-    slot_data = []
-    intent_data = []
-
-    with open(in_path, 'r') as input_fd, \
-      open(intent_path, 'r') as intent_fd, \
-      open(slot_path, 'r') as slot_fd:
-
-        for inputs, intent, slot in zip(input_fd, intent_fd, slot_fd):
-            inputs, intent, slot = inputs.rstrip(), intent.rstrip(
-            ), slot.rstrip()
-            in_data.append(
-                sentence_to_ids(SOS_TOKEN + inputs + EOS_TOKEN, in_vocab))
-            intent_data.append(sentence_to_ids(intent, intent_vocab))
-            slot_data.append(
-                sentence_to_ids('__SOS  ' + slot + ' __EOS', slot_vocab))
-
-    in_data = tf.keras.preprocessing.sequence.pad_sequences(in_data,
-                                                            padding='post',
-                                                            maxlen=maxlen)
-    slot_data = tf.keras.preprocessing.sequence.pad_sequences(slot_data,
-                                                              padding='post',
-                                                              maxlen=maxlen)
-    return in_data, slot_data, intent_data
-
-
-def create_padding_mask(seq):
-    """Creates the paddding mask that will be used by the encoder
-    for masking out the padding tokens. It also create the intent
-    mask for masking out the padding tokens in the IntentHead.
-
-    Args:
-    seq: The sequence of inputs to be passed to the model.
-
-    Returns:
-    The encoder mask and the intent mask.
-    """
-
-    enc_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
-    # add extra dimensions to add the padding to the attention logits.
-    enc_mask = enc_mask[:, tf.newaxis,
-                        tf.newaxis, :]  # (batch_size, 1, 1, seq_len)
-
-    intent_mask = tf.cast(tf.math.not_equal(seq, 0), tf.float32)
-    intent_mask = intent_mask[:, :, tf.newaxis]
-
-    return enc_mask, intent_mask
-
-
-def create_look_ahead_mask(size):
-    """Generates and returns the look ahead mask of a given size
-    to be used while decoding.
-    """
-
-    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-    return mask  # (seq_len, seq_len)
-
-
-def create_masks(inputs, target):
-    """Creates all the necessary masks for training.
-
-    Args:
-    inputs: The sequence of inputs to be passed to the model.
-    target: The slot targets to be passed to the decoder.
-
-    Returns:
-    The encoder mask and the intent mask.
-    """
-
-    # padding mask same for encoder and decoder
-    padding_mask, intent_mask = create_padding_mask(inputs)
-
-    # Used in the 1st attention block in the decoder.
-    # It is used to pad and mask future tokens in the input received by
-    # the decoder.
-    look_ahead_mask = create_look_ahead_mask(tf.shape(target)[1])
-    dec_target_padding_mask, _ = create_padding_mask(target)
-    combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-    return padding_mask, combined_mask, intent_mask
-
-
 def compute_semantic_acc(slot_real, intent_real, slot_pred, intent_pred):
     """Computes the semantic accuracy of the intent and slot predictions.
     (The percentage of queries for which both intents and slots were
@@ -520,8 +383,8 @@ def evaluate(model, dataset, slot_vocab, max_len=48):
             padding_mask, look_ahead_mask, intent_mask = create_masks(
                 inputs, output)
 
-            predictions, p_intent = model((inputs, output, padding_mask,
-                                          look_ahead_mask, intent_mask))
+            predictions, p_intent = model(
+                (inputs, output, padding_mask, look_ahead_mask, intent_mask))
 
             # select the last word from the seq_len dimension
             predictions = predictions[:, -1:, :]  # (batch_size, 1, vocab_size)

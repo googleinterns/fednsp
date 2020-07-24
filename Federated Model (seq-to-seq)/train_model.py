@@ -30,6 +30,21 @@ BUFFER_SIZE = 1000
 np.random.seed(123)
 
 
+def _optimizer_canonical_name(optimizer_cls):
+    """Return a short, canonical name for an optimizer for us in flags."""
+    return optimizer_cls.__name__.lower()
+
+
+# List of optimizers currently supported.
+_SUPPORTED_OPTIMIZERS = {
+    _optimizer_canonical_name(cls): cls
+    for cls in [
+        tf.keras.optimizers.SGD, tf.keras.optimizers.Adagrad,
+        tf.keras.optimizers.Adam
+    ]
+}
+
+
 def parse_arguments():
     """Parses all the input arguments required to define
     and train the model.
@@ -41,7 +56,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--batch_size',
                         type=int,
-                        default=32,
+                        default=8,
                         help='Batch size.')
     parser.add_argument('--num_layers',
                         type=int,
@@ -132,6 +147,14 @@ def parse_arguments():
         help=
         'Number of clients to be used for federated simulation for iid-splits.'
     )
+    parser.add_argument('--server_optimizer',
+                        type=str,
+                        default='sgd',
+                        help='Optimizer to be used for server training.')
+    parser.add_argument('--client_optimizer',
+                        type=str,
+                        default='sgd',
+                        help='Optimizer to be used for client training.')
     parser.add_argument('--server_lr',
                         type=float,
                         default=1.0,
@@ -140,6 +163,18 @@ def parse_arguments():
                         type=float,
                         default=0.02,
                         help='Learning rate of the client optimizer.')
+    parser.add_argument('--momentum',
+                        type=float,
+                        default=0.9,
+                        help='Momentum to be used with sgd')
+    parser.add_argument('--beta1',
+                        type=float,
+                        default=0.9,
+                        help='Beta1 paramerter of Yogi and Adam')
+    parser.add_argument('--beta2',
+                        type=float,
+                        default=0.999,
+                        help='Beta2 paramerter of Yogi and Adam')
     parser.add_argument(
         '--clients_per_round',
         type=int,
@@ -302,6 +337,31 @@ def preprocess(dataset, arg):
         arg.batch_size, drop_remainder=False))
 
 
+def get_optimizers(arg):
+    """Returns the optimizers for the server and the clients based
+    on the input arguments.
+
+    Args:
+    arg: The output of the parser.
+
+    Returns:
+    The server and client optimizer.
+    """
+    server_opt_cls = _SUPPORTED_OPTIMIZERS.get(arg.server_optimizer)
+    client_opt_cls = _SUPPORTED_OPTIMIZERS.get(arg.client_optimizer)
+
+    if arg.server_optimizer == 'sgd':
+        server_opt = lambda: server_opt_cls(learning_rate=arg.server_lr,
+                                            momentum=arg.momentum)
+    else:
+        server_opt = lambda: server_opt_cls(
+            learning_rate=arg.server_lr, beta1=arg.beta1, beta2=arg.beta2)
+
+    client_opt = lambda: client_opt_cls(learning_rate=arg.client_lr)
+
+    return server_opt, client_opt
+
+
 def make_federated_data(client_data, client_ids, arg):
     """Generates the training data in the format required by tensorflow
     federated.
@@ -448,15 +508,15 @@ def main():
     raw_example_dataset = ftrain_data.create_tf_dataset_for_client('1')
     example_dataset = preprocess(raw_example_dataset, arg)
 
+    server_opt, client_opt = get_optimizers(arg)
+
     # Define the federated averaging process
     iterative_process = tff.learning.build_federated_averaging_process(
         lambda: create_tff_model(
             arg, len(in_vocab['vocab']), len(slot_vocab['vocab']),
             len(intent_vocab['vocab']), example_dataset.element_spec),
-        client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=arg.
-                                                            client_lr),
-        server_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=arg.
-                                                            server_lr))
+        client_optimizer_fn=client_opt,
+        server_optimizer_fn=server_opt)
 
     server_state = iterative_process.initialize()
 

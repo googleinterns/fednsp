@@ -137,8 +137,8 @@ def evaluate(model, dataset, out_vocab, max_len=66):
             padding_mask, look_ahead_mask, pointer_mask = create_masks(
                 input, output)
 
-            pred_output = model(input, output, padding_mask,
-                                          look_ahead_mask, pointer_mask)
+            pred_output = model((input, output, padding_mask,
+                                          look_ahead_mask, pointer_mask), training=False)
 
             # select the last word from the seq_len dimension
             pred_output = pred_output[:, -1:, :]  # (batch_size, 1, vocab_size)

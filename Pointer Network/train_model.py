@@ -56,7 +56,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--batch_size',
                         type=int,
-                        default=32,
+                        default=8,
                         help='Batch size.')
     parser.add_argument('--num_layers',
                         type=int,
@@ -143,7 +143,7 @@ def parse_arguments():
     parser.add_argument(
         '--num_clients',
         type=int,
-        default=30,
+        default=200,
         help=
         'Number of clients to be used for federated simulation for iid-splits.'
     )
@@ -157,7 +157,7 @@ def parse_arguments():
                         help='Optimizer to be used for client training.')
     parser.add_argument('--server_lr',
                         type=float,
-                        default=1.0,
+                        default=10.0,
                         help='Learning rate of the server optimizer.')
     parser.add_argument('--client_lr',
                         type=float,
@@ -495,7 +495,7 @@ def main():
     summary_writer.set_as_default()
 
     # Generate a sample dataset
-    raw_example_dataset = ftrain_data.create_tf_dataset_for_client('1')
+    raw_example_dataset = ftrain_data.create_tf_dataset_for_client('0')
     example_dataset = preprocess(raw_example_dataset, arg)
 
     server_opt, client_opt = get_optimizers(arg)
@@ -549,7 +549,7 @@ def main():
 
         # # Save the best model so far
         if overall_accuracy > best_validation_acc:
-            best_validation_acc = overall
+            best_validation_acc = overall_accuracy
             checkpoint_save_path = checkpoint_manager.save()
             print('Saving checkpoint for epoch {} at {}'.format(
                 round_num, checkpoint_save_path))

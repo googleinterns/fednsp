@@ -158,7 +158,7 @@ def parse_arguments():
                         help='Optimizer to be used for client training.')
     parser.add_argument('--server_lr',
                         type=float,
-                        default=1.0,
+                        default=10.0,
                         help='Learning rate of the server optimizer.')
     parser.add_argument('--client_lr',
                         type=float,

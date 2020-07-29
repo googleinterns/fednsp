@@ -16,16 +16,22 @@ SOS_TOKEN = '__SOS'
 EOS_TOKEN = '__EOS'
 
 
-def create_vocabulary(input_path, output_path, pad=True, unk=True, sos_eos=False):
+def create_vocabulary(input_path,
+                      output_path,
+                      pad=True,
+                      unk=True,
+                      sos_eos=False):
     """Creates the vocabulary by parsing the given data ans saves it in
     the output path.
 
     Args:
     input_path: The path to the corpus for which vocabulary has to be built.
     output_path: The path to which the vocabulary has to be saved.
-    no_pad: A boolean variable to indicate if a padding token is to be
+    pad: A boolean variable to indicate if the padding token is to be
         added to the vocabulary.
-    no_unk: A boolean variable to indicate if a unknown token is to be
+    unk: A boolean variable to indicate if the unknown token is to be
+        added to the vocabulary.
+    sos_eos: A boolean variable to indicate if the SOS and EOS tokens are to
         added to the vocabulary.
     """
     if not isinstance(input_path, str):
@@ -136,14 +142,15 @@ def load_data(in_path,
 
     Args:
     in_path: The path to the file contating the input queries.
-    slot_path: The path to the file contating the slot labels.
+    out_path: The path to the file contating the annotated outputs.
     intent_path: The path to the file contating the intent labels.
     in_vocab: The vocabulary of the input sentences.
-    slot_vocab: The vocabulary of slot labels.
-    intent_vocab: The vocabulary of intent labels.
+    out_vocab: The vocabulary of outputs.
+    max_input_len: The maximum length of the input sequences.
+    max_output_len: The maximum length of the output sequences.
 
     Returns:
-    The preprocesses input data, slot lables and the intents.
+    The preprocessed input data and output sequences.
     """
 
     in_data = []
@@ -154,29 +161,28 @@ def load_data(in_path,
 
         for inputs, outputs in zip(input_fd, out_fd):
             inputs, outputs = inputs.rstrip(), outputs.strip()
-            in_data.append(
-                sentence_to_ids(inputs, in_vocab))
+            in_data.append(sentence_to_ids(inputs, in_vocab))
             out_data.append(
                 sentence_to_ids('__SOS  ' + outputs + ' __EOS', out_vocab))
 
-    in_data = tf.keras.preprocessing.sequence.pad_sequences(in_data,
-                                                            padding='post',
-                                                            maxlen=max_input_len)
-    out_data = tf.keras.preprocessing.sequence.pad_sequences(out_data,
-                                                              padding='post',
-                                                              maxlen=max_output_len)
+    in_data = tf.keras.preprocessing.sequence.pad_sequences(
+        in_data, padding='post', maxlen=max_input_len)
+    out_data = tf.keras.preprocessing.sequence.pad_sequences(
+        out_data, padding='post', maxlen=max_output_len)
     return in_data, out_data
+
 
 def create_padding_mask(seq):
     """Creates the paddding mask that will be used by the encoder
-    for masking out the padding tokens. It also create the intent
-    mask for masking out the padding tokens in the IntentHead.
+    for masking out the padding tokens. It also create the pointer
+    mask for masking out the padding tokens in the while computing
+    the pointer scores.
 
     Args:
     seq: The sequence of inputs to be passed to the model.
 
     Returns:
-    The encoder mask and the intent mask.
+    The encoder mask and the pointer mask.
     """
 
     enc_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
@@ -207,7 +213,8 @@ def create_masks(inputs, target):
     target: The slot targets to be passed to the decoder.
 
     Returns:
-    The encoder mask and the intent mask.
+    The padding mask, the combined mask for the decoder and and the
+    pointer mask.
     """
 
     # padding mask same for encoder and decoder

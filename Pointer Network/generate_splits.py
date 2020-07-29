@@ -41,150 +41,30 @@ def generate_iid_splits(in_data, out_data, num_clients=10):
                                                  tf.gather(pointer_masks,
                                                            client_idxs,
                                                            axis=0)),
-                                              y=(tf.gather(out_targets,
-                                                           client_idxs,
-                                                           axis=0),
-                                                ))
+                                              y=tf.gather(
+                                                  out_targets,
+                                                  client_idxs,
+                                                  axis=0,
+                                              ))
         fed_data[str(i)] = client_data
 
     return fed_data
-
-
-def generate_splits_type1(in_data, slot_data, intent_data, num_clients=10):
-    """Creates non-IID splits of the dataset. Each intent type is distributed
-    among the clients according to a random multinomial distribution.
-    """
-    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
-    padding_masks, look_ahead_masks, intent_masks = create_masks(
-        in_data, slot_targets)
-
-    fed_data = collections.OrderedDict()
-
-    unique_intents = np.unique(intent_data)
-
-    client_idxs = collections.defaultdict(list)
-
-    for intent_id in unique_intents:
-
-        intent_client_distribution = np.random.randint(
-            low=0, high=1000, size=num_clients).astype(np.float)
-        intent_client_distribution /= np.sum(intent_client_distribution)
-
-        intent_idxs = np.where(np.array(intent_data).squeeze() == intent_id)[0]
-
-        client_idx_distribution = np.random.multinomial(
-            1, intent_client_distribution, size=len(intent_idxs))
-        client_idx_distribution = np.argmax(client_idx_distribution, axis=1)
-
-        for client_id in range(num_clients):
-            client_idxs[client_id] += intent_idxs[(
-                client_idx_distribution == client_id)].tolist()
-
-    for i in range(num_clients):
-        client_idx = client_idxs[i]
-        client_data = collections.OrderedDict(x=(tf.gather(in_data,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(slot_inputs,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(padding_masks,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(look_ahead_masks,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(intent_masks,
-                                                           client_idx,
-                                                           axis=0)),
-                                              y=(tf.gather(slot_targets,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(intent_data,
-                                                           client_idx,
-                                                           axis=0)))
-        fed_data[str(i)] = client_data
-
-    return fed_data
-
-
-def generate_splits_type2(in_data,
-                          slot_data,
-                          intent_data,
-                          instance_types_per_client=1):
-    """Creates non-IID splits of the dataset. Each client is given only a fixed number
-    of intent types.
-    """
-    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
-    padding_masks, look_ahead_masks, intent_masks = create_masks(
-        in_data, slot_targets)
-
-    fed_data = collections.OrderedDict()
-
-    unique_intents = np.unique(intent_data)
-    np.random.shuffle(unique_intents)
-
-    num_clients = int(
-        np.ceil(len(unique_intents) / float(instance_types_per_client)))
-
-    client_idxs = collections.defaultdict(list)
-
-    for client_id in range(num_clients):
-
-        intent_ids = unique_intents[client_id *
-                                    instance_types_per_client:(client_id + 1) *
-                                    instance_types_per_client]
-
-        for intent_id in intent_ids:
-            intent_idxs = np.where(
-                np.array(intent_data).squeeze() == intent_id)[0]
-            client_idxs[client_id] += intent_idxs.tolist()
-
-    for i in range(num_clients):
-        client_idx = client_idxs[i]
-        client_data = collections.OrderedDict(x=(tf.gather(in_data,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(slot_inputs,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(padding_masks,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(look_ahead_masks,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(intent_masks,
-                                                           client_idx,
-                                                           axis=0)),
-                                              y=(tf.gather(slot_targets,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(intent_data,
-                                                           client_idx,
-                                                           axis=0)))
-        fed_data[str(i)] = client_data
-
-    return fed_data, num_clients
 
 
 def generate_splits_type3(in_data,
-                          slot_data,
-                          intent_data,
+                          out_data,
                           instance_types_per_client=3,
                           clients_per_instance_type=3):
     """Creates non-IID splits of the dataset. Each client is given only a fixed number
-    of intent types. This is different from type2 since in type 2 each intent type belongs
-    exclusively to a certain user but in type 3 the instances having the same intent type can
-    belong to different users.
+    of intent types.
     """
-    slot_inputs, slot_targets = slot_data[:, :-1], slot_data[:, 1:]
-    padding_masks, look_ahead_masks, intent_masks = create_masks(
-        in_data, slot_targets)
+    out_inputs, out_targets = out_data[:, :-1], out_data[:, 1:]
+    padding_masks, look_ahead_masks, pointer_masks = create_masks(
+        in_data, out_targets)
 
     fed_data = collections.OrderedDict()
 
-    unique_intents = np.unique(intent_data)
+    unique_intents = np.unique(out_targets[:, 0])
     np.random.shuffle(unique_intents)
 
     num_clients = int(
@@ -212,7 +92,7 @@ def generate_splits_type3(in_data,
             low=0, high=1000, size=clients_per_instance_type).astype(np.float)
         intent_client_distribution /= np.sum(intent_client_distribution)
 
-        intent_idxs = np.where(np.array(intent_data).squeeze() == intent_id)[0]
+        intent_idxs = np.where(out_targets[:, 0] == intent_id)[0]
 
         client_idx_distribution = np.random.multinomial(
             1, intent_client_distribution, size=len(intent_idxs))
@@ -227,7 +107,7 @@ def generate_splits_type3(in_data,
         client_data = collections.OrderedDict(x=(tf.gather(in_data,
                                                            client_idx,
                                                            axis=0),
-                                                 tf.gather(slot_inputs,
+                                                 tf.gather(out_inputs,
                                                            client_idx,
                                                            axis=0),
                                                  tf.gather(padding_masks,
@@ -236,13 +116,10 @@ def generate_splits_type3(in_data,
                                                  tf.gather(look_ahead_masks,
                                                            client_idx,
                                                            axis=0),
-                                                 tf.gather(intent_masks,
+                                                 tf.gather(pointer_masks,
                                                            client_idx,
                                                            axis=0)),
-                                              y=(tf.gather(slot_targets,
-                                                           client_idx,
-                                                           axis=0),
-                                                 tf.gather(intent_data,
+                                              y=(tf.gather(out_targets,
                                                            client_idx,
                                                            axis=0)))
         fed_data[str(i)] = client_data

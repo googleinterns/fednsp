@@ -19,19 +19,14 @@ SOS_TOKEN = '__SOS'
 
 def masked_slot_loss(y_true, y_pred):
     """Defines the loss function to be used while training the model.
-    The loss is defined as the sum of the intent loss and the slot loss
-    per token. Masking is used to not compute the loss on the padding tokens.
+    Masking is used to not compute the loss on the padding tokens.
 
     Args:
-    slot_real: The ground truth for the slots.
-    intent_real: The ground through for the intents.
-    slot_pred: The slots predicted by the model.
-    intent_pred: The intents predicted by the model.
-    intent_loss_objective: The objective used to compute the intent loss.
-    slot_loss_objective: The objective used to compute the slot loss.
+        y_true: The ground truth for the annotations.
+        y_pred: The annotations predicted by the model.
 
     Returns:
-    The total loss.
+    The total loss per output token.
     """
     loss_objective = tf.keras.losses.SparseCategoricalCrossentropy(
         from_logits=True, reduction='none')
@@ -60,9 +55,7 @@ class IntentSlotAccuracy(tf.keras.metrics.Metric):
     """Class defines the intent + slot accuracy metric to be used
     for the given task.
     """
-    def __init__(self,
-                 name='intent_slot_accuracy',
-                 **kwargs):
+    def __init__(self, name='intent_slot_accuracy', **kwargs):
         super(IntentSlotAccuracy, self).__init__(name=name, **kwargs)
         self.true_positives = self.add_weight(name='tp', initializer='zeros')
         self.total = self.add_weight(name='tp', initializer='zeros')
@@ -221,6 +214,54 @@ def compute_start_end_chunks(last_tag, current_tag, last_type, current_type):
 
     return correct_start_of_chunk, correct_end_of_chunk
 
+def compute_precision_recall(correct_chunk_cnt, found_pred_cnt,
+                             found_correct_cnt):
+    """Computes and returns the precision and recall.
+
+    Args:
+    correct_chunk_cnt: The count of correctly predicted chunks.
+    found_pred_cnt:  The count of predicted chunks.
+    found_correct_cnt : The actual count of chunks.
+
+    Returns:
+    The slot precision and recall
+    """
+
+    if found_pred_cnt > 0:
+        precision = 100 * correct_chunk_cnt / found_pred_cnt
+    else:
+        precision = 0
+
+    if found_correct_cnt > 0:
+        recall = 100 * correct_chunk_cnt / found_correct_cnt
+    else:
+        recall = 0
+
+    return precision, recall
+
+
+def compute_start_end_chunks(last_tag, current_tag, last_type, current_type):
+    """Computes if the current token is the beginning and the end of a 
+    argument
+
+    Args:
+    last_tag: The previous slot tag.
+    current_tag: The current slot tag.
+    last_type:  The type of the previous slot tag.
+    current_type:  The type of the current slot tag.
+
+    Returns:
+    Boolean variable to indicate if beginning and end of chunk.
+    """
+    correct_start_of_chunk = start_of_chunk(last_tag, current_tag, last_type,
+                                            current_type)
+
+    correct_end_of_chunk = end_of_chunk(last_tag, current_tag, last_type,
+                                        current_type)
+
+    return correct_start_of_chunk, correct_end_of_chunk
+
+
 def compute_f1(correct_slots, pred_slots):
     """Computes and returns the f1 score of the predicted slots.
 
@@ -249,13 +290,10 @@ def compute_f1(correct_slots, pred_slots):
 
             # Check if the current chunk in pred and ground truth start or end
             correct_start_of_chunk, correct_end_of_chunk = compute_start_end_chunks(
-                                                            last_correct_tag, correct_tag,
-                                                            last_correct_type,
-                                                            correct_type)
+                last_correct_tag, correct_tag, last_correct_type, correct_type)
 
             pred_start_of_chunk, pred_end_of_chunk = compute_start_end_chunks(
-                                                      last_pred_tag, pred_tag,
-                                                      last_pred_type, pred_type)
+                last_pred_tag, pred_tag, last_pred_type, pred_type)
 
             if in_correct:
                 # If both chunks end, increment corrent count by 1
@@ -289,7 +327,9 @@ def compute_f1(correct_slots, pred_slots):
         if in_correct:
             correct_chunk_cnt += 1
 
-    precision, recall = compute_precision_recall(correct_chunk_cnt, found_pred_cnt, found_correct_cnt)
+    precision, recall = compute_precision_recall(correct_chunk_cnt,
+                                                 found_pred_cnt,
+                                                 found_correct_cnt)
 
     if (precision + recall) > 0:
         f1_score = (2 * precision * recall) / (precision + recall)

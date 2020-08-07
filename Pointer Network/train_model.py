@@ -14,6 +14,8 @@ import os
 import argparse
 import json
 import time
+import collections
+import functools
 
 import numpy as np
 import tensorflow as tf
@@ -21,28 +23,20 @@ import tensorflow_federated as tff
 from tensorflow import keras
 
 from model_layers import Encoder, Decoder, OutputHead
-from data_utils import load_data, create_vocabulary, load_vocabulary
-from model_utils import evaluate, MaskedLoss, IntentSlotAccuracy
-from generate_splits import generate_iid_splits, generate_splits_type3
+from data_utils import load_data, create_vocabulary, load_vocabulary, create_masks
+from model_utils import evaluate, MaskedLoss, IntentSlotAccuracy, build_personalize_fn, evaluate_fn
+from generate_splits import generate_iid_splits, generate_non_iid_splits
 
 tf.compat.v1.enable_v2_behavior()
 
 BUFFER_SIZE = 1000
 np.random.seed(123)
 
-
-def _optimizer_canonical_name(optimizer_cls):
-    """Return a short, canonical name for an optimizer for us in flags."""
-    return optimizer_cls.__name__.lower()
-
-
 # List of optimizers currently supported.
 _SUPPORTED_OPTIMIZERS = {
-    _optimizer_canonical_name(cls): cls
-    for cls in [
-        tf.keras.optimizers.SGD, tf.keras.optimizers.Adagrad,
-        tf.keras.optimizers.Adam
-    ]
+    'sgd': tf.keras.optimizers.SGD,
+    'adam': tf.keras.optimizers.Adam,
+    'adagrad': tf.keras.optimizers.Adagrad
 }
 
 
@@ -139,7 +133,7 @@ def parse_arguments():
     parser.add_argument(
         '--split_type',
         type=str,
-        default='iid',
+        default='non_iid',
         help='IID or non-IID splits to be used for the simulation.')
     parser.add_argument(
         '--num_clients',
@@ -182,6 +176,24 @@ def parse_arguments():
         default=-1,
         help=
         'Number of clients for each round update. (-1 indicates all clients)')
+    parser.add_argument(
+        '--personalization',
+        type=int,
+        default=1,
+        help=
+        'A value of 1 indicates personalization and 0 indicates no personalization.'
+    )
+    parser.add_argument(
+        '--pre_train_ratio',
+        type=float,
+        default=0.1,
+        help='The fraction of the training set to be used for pre-traning.')
+    parser.add_argument(
+        '--p13n_ratio',
+        type=float,
+        default=0.8,
+        help='The fraction of the training set to be used for personalization.'
+    )
 
     arg = parser.parse_args()
 
@@ -345,10 +357,8 @@ def preprocess(dataset, arg):
 def get_optimizers(arg):
     """Returns the optimizers for the server and the clients based
     on the input arguments.
-
     Args:
     arg: The output of the parser.
-
     Returns:
     The server and client optimizer.
     """
@@ -358,13 +368,69 @@ def get_optimizers(arg):
     if arg.server_optimizer == 'sgd':
         server_opt = lambda: server_opt_cls(learning_rate=arg.server_lr,
                                             momentum=arg.momentum)
-    else:
+    elif arg.server_optimizer in ['adam', 'adagrad']:
         server_opt = lambda: server_opt_cls(
-            learning_rate=arg.server_lr, beta1=arg.beta1, beta2=arg.beta2)
+            learning_rate=arg.server_lr, beta_1=arg.beta1, beta_2=arg.beta2)
+    else:
+        print('{} optimizer not supported.'.format(arg.server_optimizer))
+        raise Exception
 
     client_opt = lambda: client_opt_cls(learning_rate=arg.client_lr)
 
     return server_opt, client_opt
+
+
+def train_model(model, train_dataset, valid_dataset, out_vocab, num_epochs=20):
+    """Pre-trains the model with a subset of the training set to
+    simulate a data donation setup.
+
+    Args:
+    model: The model to be pre-trained.
+    train_dataset: The training set.
+    valid_set: The dataset on which the model will be evaluated.
+    out_vocab: The output vocabulary
+    num_epochs: Number of rounds the model has to be pre-trained for.
+    """
+    loss_objective = MaskedLoss()
+    train_loss = tf.keras.metrics.Mean(name='train_loss')
+    optimizer = tf.keras.optimizers.Adam()
+
+    # training step
+    train_step_signature = [
+        tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+        tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+    ]
+
+    @tf.function(input_signature=train_step_signature)
+    def train_step(inputs, outputs):
+        dec_inputs = outputs[:, :-1]
+        dec_target = outputs[:, 1:]
+
+        padding_mask, look_ahead_mask, pointer_mask = create_masks(
+            inputs, dec_target)
+
+        with tf.GradientTape() as tape:
+            y_pred = model((inputs, dec_inputs, padding_mask, look_ahead_mask,
+                            pointer_mask),
+                           training=True)
+
+            loss = loss_objective(dec_target, y_pred)
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+
+        train_loss(loss)
+
+    for epoch in range(num_epochs):
+        train_loss.reset_states()
+
+        for inp, out in train_dataset:
+            train_step(inp, out)
+
+        print('Epoch {} Loss {:.4f} '.format(epoch + 1, train_loss.result()))
+
+        print('Validation Metrics :')
+        val_acc = evaluate(model, valid_dataset, out_vocab)
 
 
 def make_federated_data(client_data, client_ids, arg):
@@ -450,9 +516,84 @@ def generate_splits(in_data, out_data, arg):
     if arg.split_type == 'iid':
         splits = generate_iid_splits(in_data, out_data, arg.num_clients)
     elif arg.split_type == 'non_iid':
-        splits, arg.num_clients = generate_splits_type3(in_data, out_data)
+        splits, _, arg.num_clients = generate_non_iid_splits(in_data, out_data)
 
     return splits
+
+
+def get_p13_data(train_in_data, train_out_data, valid_in_data, valid_out_data):
+    """Generates non-IID splits of dataset to be used for personalization.
+
+    Args:
+    train_in_data: A subset of train input queries.
+    train_out_data: A subset of train output sequences.
+    valid_in_data: A subset of validation input queries.
+    valid_out_data: A subset of validation output sequences.
+
+    Returns:
+    The personalization data needed for TFF.
+    """
+    in_data = np.concatenate((train_in_data, valid_in_data), axis=0)
+    out_data = np.concatenate((train_out_data, valid_out_data), axis=0)
+
+    train_splits, valid_splits, num_clients = generate_non_iid_splits(
+        in_data,
+        out_data,
+        instance_types_per_client=3,
+        instances_per_client=150,
+        p13n_train_ratio=0.8)
+
+    train_splits = tff.simulation.FromTensorSlicesClientData(train_splits)
+    valid_splits = tff.simulation.FromTensorSlicesClientData(valid_splits)
+
+    federated_p13n_data = []
+    for client_id in range(num_clients):
+        federated_p13n_data.append(
+            collections.OrderedDict([
+                ('train_data',
+                 train_splits.create_tf_dataset_for_client(str(client_id))),
+                ('test_data',
+                 valid_splits.create_tf_dataset_for_client(str(client_id)))
+            ]))
+
+    return federated_p13n_data
+
+
+def get_p13_eval(model_fn, evaluate_fn):
+    """Defines the personalization strategies.
+
+    Args:
+    model_fn: A function to create a TFF model.
+    evaluate_fn: A function to evaluate the TFF model.
+
+    Returns:
+    A dictionary of personalization strategies.
+    """
+    personalize_fn_dict = collections.OrderedDict()
+
+    sgd_opt = lambda: tf.keras.optimizers.SGD(learning_rate=0.001)
+    personalize_fn_dict['sgd'] = functools.partial(build_personalize_fn,
+                                                   optimizer_fn=sgd_opt,
+                                                   train_batch_size=8,
+                                                   max_num_epochs=10,
+                                                   num_epochs_per_eval=5,
+                                                   test_batch_size=50)
+
+    adam_opt = lambda: tf.keras.optimizers.Adam(learning_rate=2e-5)
+    personalize_fn_dict['adam'] = functools.partial(build_personalize_fn,
+                                                    optimizer_fn=adam_opt,
+                                                    train_batch_size=8,
+                                                    max_num_epochs=10,
+                                                    num_epochs_per_eval=5,
+                                                    test_batch_size=50)
+
+    p13n_eval = tff.learning.build_personalization_eval(
+        model_fn=model_fn,
+        personalize_fn_dict=personalize_fn_dict,
+        baseline_evaluate_fn=functools.partial(evaluate_fn, batch_size=8),
+        max_num_samples=900)
+
+    return p13n_eval
 
 
 def main():
@@ -474,6 +615,66 @@ def main():
     test_in_data, test_out_data = load_dataset(arg, arg.test_data_path,
                                                in_vocab, out_vocab)
 
+    #Generating splits for pre-training, federated training and personalization evaluation
+    central_idxs = np.random.choice(len(train_in_data),
+                                    int(arg.pre_train_ratio *
+                                        len(train_in_data)),
+                                    replace=False)
+    distributed_idxs = [
+        idx for idx in np.arange(len(train_in_data)) if idx not in central_idxs
+    ]
+
+    central_in_data, central_out_data = tf.gather(
+        train_in_data, central_idxs), tf.gather(train_out_data, central_idxs)
+
+    # For personalization, split training set again
+    if arg.personalization:
+        federated_training_idxs = np.random.choice(distributed_idxs,
+                                                   int(arg.p13n_ratio *
+                                                       len(distributed_idxs)),
+                                                   replace=False)
+        p13_idxs = [
+            idx for idx in np.arange(len(distributed_idxs))
+            if idx not in federated_training_idxs
+        ]
+
+        validation_training_idxs = np.random.choice(len(valid_in_data),
+                                                    int(arg.p13n_ratio *
+                                                        len(valid_in_data)),
+                                                    replace=False)
+        validation_p13_idxs = [
+            idx for idx in np.arange(len(valid_in_data))
+            if idx not in validation_training_idxs
+        ]
+
+        p13_in_data, p13_out_data = tf.gather(train_in_data,
+                                              p13_idxs), tf.gather(
+                                                  train_out_data, p13_idxs)
+        train_in_data, train_out_data = tf.gather(
+            train_in_data,
+            federated_training_idxs), tf.gather(train_out_data,
+                                                federated_training_idxs)
+
+        p13_valid_in_data, p13_valid_out_data = tf.gather(
+            valid_in_data,
+            validation_p13_idxs), tf.gather(valid_out_data,
+                                            validation_p13_idxs)
+        valid_in_data, valid_out_data = tf.gather(
+            valid_in_data,
+            validation_training_idxs), tf.gather(valid_out_data,
+                                                 validation_training_idxs)
+    else:
+        train_in_data, train_out_data = tf.gather(train_in_data,
+                                                  distributed_idxs), tf.gather(
+                                                      train_out_data,
+                                                      distributed_idxs)
+
+    # Define the dataset to be used for pre-traning
+    train_dataset = tf.data.Dataset.from_tensor_slices(
+        (central_in_data, central_out_data)).shuffle(1000)
+    train_dataset = train_dataset.batch(32, drop_remainder=True)
+
+    # Define the validation and test datasets on which the model will be evaluated.
     valid_dataset = tf.data.Dataset.from_tensor_slices(
         (valid_in_data, valid_out_data))
     valid_dataset = valid_dataset.batch(2048, drop_remainder=False)
@@ -486,6 +687,13 @@ def main():
     ftrain_data = generate_splits(train_in_data, train_out_data, arg)
     ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
 
+    # Get personalization splits
+    if arg.personalization:
+        federated_p13n_data = get_p13_data(p13_in_data, p13_out_data,
+                                           p13_valid_in_data,
+                                           p13_valid_out_data)
+
+    # Set the correct number of cliets per round.
     if arg.clients_per_round == -1:
         arg.clients_per_round = arg.num_clients
 
@@ -493,9 +701,12 @@ def main():
     local_model = create_keras_model(arg, len(in_vocab['vocab']),
                                      len(out_vocab['vocab']))
 
+    # Setup the checkpointing
     checkpoint_manager, summary_writer = manage_checkpoints(local_model, arg)
-
     summary_writer.set_as_default()
+
+    # Pre-train the model
+    train_model(local_model, train_dataset, valid_dataset, out_vocab)
 
     # Generate a sample dataset for the input spec
     raw_example_dataset = ftrain_data.create_tf_dataset_for_client('0')
@@ -503,14 +714,26 @@ def main():
 
     server_opt, client_opt = get_optimizers(arg)
 
+    model_fn = lambda: create_tff_model(arg, len(in_vocab[
+        'vocab']), len(out_vocab['vocab']), example_dataset.element_spec)
+
     # Define the federated averaging process
     iterative_process = tff.learning.build_federated_averaging_process(
-        lambda: create_tff_model(arg, len(in_vocab[
-            'vocab']), len(out_vocab['vocab']), example_dataset.element_spec),
+        model_fn,
         client_optimizer_fn=client_opt,
         server_optimizer_fn=server_opt)
 
+    if arg.personalization:
+        p13n_eval = get_p13_eval(model_fn, evaluate_fn)
+
     server_state = iterative_process.initialize()
+
+    # Initialize the server model with the pre-trained weights
+    trainable_weights = [
+        weights.numpy() for weights in local_model.trainable_weights
+    ]
+    server_state = tff.learning.state_with_new_model_weights(
+        server_state, trainable_weights, local_model.non_trainable_weights)
 
     best_validation_acc = 0.0
 
@@ -529,7 +752,6 @@ def main():
         # Perform one round of federated training
         server_state, metrics = iterative_process.next(server_state,
                                                        ftrain_data_subset)
-        # metrics = metrics.train
 
         # Compute and log validation metrics
         tff.learning.assign_weights_to_keras_model(local_model,
@@ -547,7 +769,31 @@ def main():
                           overall_accuracy,
                           step=round_num)
 
-        # # Save the best model so far
+        # If personalization has been enabled, print personalization metrics
+        if round_num % 20 == 0 and arg.personalization:
+            p13n_metrics = p13n_eval(server_state.model, federated_p13n_data)
+
+            print('Server model metrics:')
+            global_model_acc = np.array(
+                p13n_metrics['baseline_metrics']['intent_slot_accuracy'])
+            print('Overall accuracy : {}'.format(
+                np.mean(global_model_acc).item()))
+
+            print('Personalized model metrics (SGD):')
+
+            personalized_model_acc = np.array(
+                p13n_metrics['sgd']['final_model']['intent_slot_accuracy'])
+            print('Overall accuracy : {}'.format(
+                np.mean(personalized_model_acc).item()))
+
+            print('Personalized model metrics (Adam):')
+
+            personalized_model_acc = np.array(
+                p13n_metrics['adam']['final_model']['intent_slot_accuracy'])
+            print('Overall accuracy : {}'.format(
+                np.mean(personalized_model_acc).item()))
+
+        # Save the best model so far
         if overall_accuracy > best_validation_acc:
             best_validation_acc = overall_accuracy
             checkpoint_save_path = checkpoint_manager.save()

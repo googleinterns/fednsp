@@ -174,6 +174,52 @@ def split_tag_type(tag):
         tag_type = split_tag[1]
     return tag, tag_type
 
+def compute_precision_recall(correct_chunk_cnt, found_pred_cnt, found_correct_cnt):
+    """Computes and returns the precision and recall.
+
+    Args:
+    correct_chunk_cnt: The count of correctly predicted chunks.
+    found_pred_cnt:  The count of predicted chunks.
+    found_correct_cnt : The actual count of chunks.
+
+    Returns:
+    The slot precision and recall
+    """
+
+    if found_pred_cnt > 0:
+        precision = 100 * correct_chunk_cnt / found_pred_cnt
+    else:
+        precision = 0
+
+    if found_correct_cnt > 0:
+        recall = 100 * correct_chunk_cnt / found_correct_cnt
+    else:
+        recall = 0
+
+    return precision, recall
+
+def compute_start_end_chunks(last_tag, current_tag, last_type, current_type):
+    """Computes if the current token is the beginning and the end of a 
+    argument
+
+    Args:
+    last_tag: The previous slot tag.
+    current_tag: The current slot tag.
+    last_type:  The type of the previous slot tag.
+    current_type:  The type of the current slot tag.
+
+    Returns:
+    Boolean variable to indicate if beginning and end of chunk.
+    """
+    correct_start_of_chunk = start_of_chunk(last_tag,
+                                            current_tag,
+                                            last_type,
+                                            current_type)
+
+    correct_end_of_chunk = end_of_chunk(last_tag, current_tag,
+                                        last_type, current_type)
+
+    return correct_start_of_chunk, correct_end_of_chunk
 
 def compute_f1(correct_slots, pred_slots):
     """Computes and returns the f1 score of the predicted slots.
@@ -186,73 +232,54 @@ def compute_f1(correct_slots, pred_slots):
     The slot f1 score.
     """
 
-    correct_chunk = {}
     correct_chunk_cnt = 0
-    found_correct = {}
     found_correct_cnt = 0
-    found_pred = {}
     found_pred_cnt = 0
-    correct_tags = 0
-    token_count = 0
+
     for correct_slot, pred_slot in zip(correct_slots, pred_slots):
         in_correct = False
         last_correct_tag = 'O'
         last_correct_type = ''
         last_pred_tag = 'O'
         last_pred_type = ''
+
         for c, p in zip(correct_slot, pred_slot):
             correct_tag, correct_type = split_tag_type(c)
             pred_tag, pred_type = split_tag_type(p)
 
-            correct_end_of_chunk = end_of_chunk(last_correct_tag, correct_tag,
-                                                last_correct_type,
-                                                correct_type)
-            pred_end_of_chunk = end_of_chunk(last_pred_tag, pred_tag,
-                                             last_pred_type, pred_type)
+            # Check if the current chunk in pred and ground truth start or end
+            correct_start_of_chunk, correct_end_of_chunk = compute_start_end_chunks(
+                                                            last_correct_tag, correct_tag,
+                                                            last_correct_type,
+                                                            correct_type)
 
-            correct_start_of_chunk = start_of_chunk(last_correct_tag,
-                                                    correct_tag,
-                                                    last_correct_type,
-                                                    correct_type)
-            pred_start_of_chunk = start_of_chunk(last_pred_tag, pred_tag,
-                                                 last_pred_type, pred_type)
+            pred_start_of_chunk, pred_end_of_chunk = compute_start_end_chunks(
+                                                      last_pred_tag, pred_tag,
+                                                      last_pred_type, pred_type)
 
             if in_correct:
+                # If both chunks end, increment corrent count by 1
                 if correct_end_of_chunk and pred_end_of_chunk and \
                         (last_correct_type == last_pred_type):
                     in_correct = False
                     correct_chunk_cnt += 1
-                    if last_correct_type in correct_chunk:
-                        correct_chunk[last_correct_type] += 1
-                    else:
-                        correct_chunk[last_correct_type] = 1
 
                 elif correct_end_of_chunk != pred_end_of_chunk or \
                                      (correct_type != pred_type):
                     in_correct = False
 
+            # If both the prediction and ground truth chunk start
             if correct_start_of_chunk and pred_start_of_chunk and \
                     (correct_type == pred_type):
                 in_correct = True
 
+            # Increment number of chunks in ground truth if new chunk starts
             if correct_start_of_chunk:
                 found_correct_cnt += 1
-                if correct_type in found_correct:
-                    found_correct[correct_type] += 1
-                else:
-                    found_correct[correct_type] = 1
 
+            # Increment number of chunks in preds if new chunk starts
             if pred_start_of_chunk:
                 found_pred_cnt += 1
-                if pred_type in found_pred:
-                    found_pred[pred_type] += 1
-                else:
-                    found_pred[pred_type] = 1
-
-            if correct_tag == pred_tag and correct_type == pred_type:
-                correct_tags += 1
-
-            token_count += 1
 
             last_correct_tag = correct_tag
             last_correct_type = correct_type
@@ -261,20 +288,8 @@ def compute_f1(correct_slots, pred_slots):
 
         if in_correct:
             correct_chunk_cnt += 1
-            if last_correct_type in correct_chunk:
-                correct_chunk[last_correct_type] += 1
-            else:
-                correct_chunk[last_correct_type] = 1
 
-    if found_pred_cnt > 0:
-        precision = 100 * correct_chunk_cnt / found_pred_cnt
-    else:
-        precision = 0
-
-    if found_correct_cnt > 0:
-        recall = 100 * correct_chunk_cnt / found_correct_cnt
-    else:
-        recall = 0
+    precision, recall = compute_precision_recall(correct_chunk_cnt, found_pred_cnt, found_correct_cnt)
 
     if (precision + recall) > 0:
         f1_score = (2 * precision * recall) / (precision + recall)
@@ -309,6 +324,7 @@ def compute_semantic_acc(slot_real, intent_real, slot_pred, intent_pred):
 
             if s_pred[i] != s_real[i]:
                 semantic_acc[idx] = False
+                break
 
     semantic_acc = semantic_acc.astype(float)
     semantic_acc = np.mean(semantic_acc) * 100.0

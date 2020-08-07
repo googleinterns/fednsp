@@ -167,6 +167,52 @@ def split_tag_type(tag):
         tag_type = split_tag[1]
     return tag, tag_type
 
+def compute_precision_recall(correct_chunk_cnt, found_pred_cnt, found_correct_cnt):
+    """Computes and returns the precision and recall.
+
+    Args:
+    correct_chunk_cnt: The count of correctly predicted chunks.
+    found_pred_cnt:  The count of predicted chunks.
+    found_correct_cnt : The actual count of chunks.
+
+    Returns:
+    The slot precision and recall
+    """
+
+    if found_pred_cnt > 0:
+        precision = 100 * correct_chunk_cnt / found_pred_cnt
+    else:
+        precision = 0
+
+    if found_correct_cnt > 0:
+        recall = 100 * correct_chunk_cnt / found_correct_cnt
+    else:
+        recall = 0
+
+    return precision, recall
+
+def compute_start_end_chunks(last_tag, current_tag, last_type, current_type):
+    """Computes if the current token is the beginning and the end of a 
+    argument
+
+    Args:
+    last_tag: The previous slot tag.
+    current_tag: The current slot tag.
+    last_type:  The type of the previous slot tag.
+    current_type:  The type of the current slot tag.
+
+    Returns:
+    Boolean variable to indicate if beginning and end of chunk.
+    """
+    correct_start_of_chunk = start_of_chunk(last_tag,
+                                            current_tag,
+                                            last_type,
+                                            current_type)
+
+    correct_end_of_chunk = end_of_chunk(last_tag, current_tag,
+                                        last_type, current_type)
+
+    return correct_start_of_chunk, correct_end_of_chunk
 
 def compute_precision_recall(correct_chunk_cnt, found_pred_cnt,
                              found_correct_cnt):

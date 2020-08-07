@@ -4,6 +4,7 @@ This file contains functions to compute the loss
 and metrics to be used to evaluate the model performance.
 """
 
+import collections
 import tensorflow as tf
 import numpy as np
 
@@ -50,12 +51,10 @@ class IntentSlotAccuracy(tf.keras.metrics.Metric):
 
     def update_state(self, y_true, y_pred, sample_weight=None):
 
-        mask = tf.cast(tf.math.logical_not(tf.math.equal(y_true[0], 0)),
-                       tf.int32)
+        mask = tf.cast(tf.math.logical_not(tf.math.equal(y_true, 0)), tf.int32)
         tp = tf.cast(
             tf.math.equal(
-                y_true[0],
-                tf.math.argmax(y_pred[0], axis=-1, output_type=tf.int32)),
+                y_true, tf.math.argmax(y_pred, axis=-1, output_type=tf.int32)),
             tf.int32)
 
         accuracy = tf.math.reduce_sum(tf.math.multiply(tp, mask), axis=-1)
@@ -63,7 +62,7 @@ class IntentSlotAccuracy(tf.keras.metrics.Metric):
 
         tp = tf.reduce_sum(tf.cast(accuracy, tf.float32))
 
-        total = tf.shape(y_true[0])[0]
+        total = tf.shape(y_true)[0]
 
         self.true_positives.assign_add(tp)
         self.total.assign_add(tf.cast(total, tf.float32))
@@ -124,9 +123,9 @@ def evaluate(model, dataset, out_vocab, max_len=66):
             padding_mask, look_ahead_mask, pointer_mask = create_masks(
                 input_batch, output)
 
-            pred_output = model(
-                (input_batch, output, padding_mask, look_ahead_mask, pointer_mask),
-                training=False)
+            pred_output = model((input_batch, output, padding_mask,
+                                 look_ahead_mask, pointer_mask),
+                                training=False)
 
             # select the last word from the seq_len dimension
             pred_output = pred_output[:, -1:, :]  # (batch_size, 1, vocab_size)
@@ -177,8 +176,8 @@ def write_predictions_to_file(model,
             padding_mask, look_ahead_mask, pointer_mask = create_masks(
                 input_batch, output)
 
-            pred_output = model(input_batch, output, padding_mask, look_ahead_mask,
-                                pointer_mask)
+            pred_output = model(input_batch, output, padding_mask,
+                                look_ahead_mask, pointer_mask)
 
             # select the last word from the seq_len dimension
             pred_output = pred_output[:, -1:, :]  # (batch_size, 1, vocab_size)
@@ -207,7 +206,8 @@ def write_predictions_to_file(model,
                 break
             decoded_token = out_vocab['rev'][output_token]
             if decoded_token.startswith('@ptr'):
-                output_decoded.append(input_batch[int(decoded_token.split('_')[-1])])
+                output_decoded.append(input_batch[int(
+                    decoded_token.split('_')[-1])])
             else:
                 if ']' in decoded_token:
                     decoded_token = ']'
@@ -218,3 +218,140 @@ def write_predictions_to_file(model,
     with open(out_path, 'w+') as out:
         for output in decoded_preds:
             out.write(output + '\n')
+
+
+def build_personalize_fn(optimizer_fn,
+                         train_batch_size,
+                         max_num_epochs,
+                         num_epochs_per_eval,
+                         test_batch_size,
+                         shuffle=True,
+                         shuffle_buffer_size=1000):
+    """Example of a builder function that constructs a `personalize_fn`.
+  The returned function represents the optimization algorithm to run on each
+  client in order to personalize a model for those clients.
+  Args:
+    optimizer_fn: A no-argument function that returns a
+      `tf.keras.optimizers.Optimizer`.
+    train_batch_size: An `int` specifying the batch size used in training the
+      personalized model.
+    max_num_epochs: An `int` specifying the maximum number of epochs used in
+      training a personalized model.
+    num_epochs_per_eval: An `int` specifying the frequency that a personalized
+      model gets evaluated during the process of training.
+    test_batch_size: An `int` specifying the batch size used in evaluation.
+    shuffle: A `bool` specifying whether to shuffle train data in every epoch.
+    shuffle_buffer_size: An `int` specifying the buffer size used in shuffling
+      the train data when `shuffle=True`.
+  Returns:
+    A `tf.function` that trains a personalized model, evaluates the model every
+    `num_epochs_per_eval` epochs, and returns the evaluation metrics.
+  """
+    # Create the `optimizer` here instead of inside the `tf.function` below,
+    # because a `tf.function` generally does not allow creating new variables.
+    optimizer = optimizer_fn()
+
+    @tf.function
+    def personalize_fn(model, train_data, test_data, context=None):
+        """A personalization strategy that trains a model and returns the metrics.
+    Args:
+      model: A `tff.learning.Model`.
+      train_data: An unbatched `tf.data.Dataset` used for training.
+      test_data: An unbatched `tf.data.Dataset` used for evaluation.
+      context: An optional object (e.g., extra dataset) used in personalization.
+    Returns:
+      An `OrderedDict` that maps a metric name to `tf.Tensor`s containing the
+      evaluation metrics.
+    """
+        del context  # This example does not use extra context.
+
+        def train_one_batch(state, batch):
+            """Run gradient descent on a batch."""
+            with tf.GradientTape() as tape:
+                output = model.forward_pass(batch)
+
+            grads = tape.gradient(output.loss, model.trainable_variables)
+            optimizer.apply_gradients(
+                zip(tf.nest.flatten(grads),
+                    tf.nest.flatten(model.trainable_variables)))
+            # Update the number of examples and the number of batches.
+            next_state = (state[0] + output.num_examples, state[1] + 1)
+            return next_state
+
+        def train_several_epochs(num_epochs, state):
+            """Train the model for several epochs on `train_data`."""
+            data = train_data.repeat(num_epochs)
+            if shuffle:
+                data = data.shuffle(shuffle_buffer_size)
+            data = data.batch(train_batch_size)
+            return data.reduce(initial_state=state,
+                               reduce_func=train_one_batch)
+
+        # Start training.
+        training_state = (0, 0)  # (number of examples, number of batches)
+
+        training_state = train_several_epochs(max_num_epochs, training_state)
+
+        metrics_dict = collections.OrderedDict()
+
+        # Save the training statistics.
+        metrics_dict['num_examples'] = training_state[0]
+        metrics_dict['num_batches'] = training_state[1]
+
+        # Evaluate the final model.
+        metrics_dict['final_model'] = evaluate_fn(model, test_data,
+                                                  test_batch_size)
+
+        return metrics_dict
+
+    return personalize_fn
+
+
+@tf.function
+def evaluate_fn(model, dataset, batch_size):
+    """Evaluate a model on the given dataset.
+  Note: The returned metrics are defined in `model.report_local_outputs`, which
+  can be specified by the `metrics` argument when using
+  `tff.learning.from_keras_model` to build the input `tff.learning.Model`. In
+  addition to passing the `metrics` argument to `tff.learning.from_keras_model`,
+  users can always define extra metrics they want to evaluate inside this
+  `evaluate_fn` function.
+  Args:
+    model: A `tff.learning.Model`.
+    dataset: An unbatched `tf.data.Dataset`.
+    batch_size: An `int` specifying the batch size used in evaluation.
+  Returns:
+    An `OrderedDict` of metric names to scalar `tf.Tensor`s containing the
+    evaluation metrics defined in `model.report_local_outputs`.
+  """
+    # Reset the model's local variables. This is necessary because
+    # `model.report_local_outputs()` aggregates the metrics from *all* previous
+    # calls to `forward_pass` (which include the metrics computed in training).
+    # Resetting ensures that the returned metrics are computed on test data.
+    # Similar to the `reset_states` method of `tf.metrics.Metric`.
+    for var in model.local_variables:
+        if var.initial_value is not None:
+            var.assign(var.initial_value)
+        else:
+            var.assign(tf.zeros_like(var))
+
+    def reduce_fn(dummy_input, batch):
+        model.forward_pass(batch, training=False)
+        return dummy_input
+
+    batched_dataset = dataset.batch(batch_size)
+    # Running `reduce_fn` over the input dataset. The aggregated metrics can be
+    # accessed via `model.report_local_outputs()`.
+    batched_dataset.reduce(initial_state=tf.constant(0), reduce_func=reduce_fn)
+
+    results = collections.OrderedDict()
+    local_outputs = model.report_local_outputs()
+    for name, metric in local_outputs.items():
+        if isinstance(metric, list) and (len(metric) == 2):
+            # Some metrics returned by `report_local_outputs()` can have two scalars:
+            # one represents `sum`, and the other represents `count`. Ideally we want
+            # to return a single scalar for each metric.
+            results[name] = metric[0] / metric[1]
+        else:
+            results[name] = metric[0] if isinstance(metric, list) else metric
+    return results

@@ -29,19 +29,11 @@ tf.compat.v1.enable_v2_behavior()
 BUFFER_SIZE = 1000
 np.random.seed(123)
 
-
-def _optimizer_canonical_name(optimizer_cls):
-    """Return a short, canonical name for an optimizer for us in flags."""
-    return optimizer_cls.__name__.lower()
-
-
 # List of optimizers currently supported.
 _SUPPORTED_OPTIMIZERS = {
-    _optimizer_canonical_name(cls): cls
-    for cls in [
-        tf.keras.optimizers.SGD, tf.keras.optimizers.Adagrad,
-        tf.keras.optimizers.Adam
-    ]
+    'sgd': tf.keras.optimizers.SGD,
+    'adam': tf.keras.optimizers.Adam,
+    'adagrad': tf.keras.optimizers.Adagrad
 }
 
 
@@ -340,10 +332,8 @@ def preprocess(dataset, arg):
 def get_optimizers(arg):
     """Returns the optimizers for the server and the clients based
     on the input arguments.
-
     Args:
     arg: The output of the parser.
-
     Returns:
     The server and client optimizer.
     """
@@ -353,9 +343,12 @@ def get_optimizers(arg):
     if arg.server_optimizer == 'sgd':
         server_opt = lambda: server_opt_cls(learning_rate=arg.server_lr,
                                             momentum=arg.momentum)
-    else:
+    elif arg.server_optimizer in ['adam', 'adagrad']:
         server_opt = lambda: server_opt_cls(
-            learning_rate=arg.server_lr, beta1=arg.beta1, beta2=arg.beta2)
+            learning_rate=arg.server_lr, beta_1=arg.beta1, beta_2=arg.beta2)
+    else:
+        print('{} optimizer not supported.'.format(arg.server_optimizer))
+        raise Exception
 
     client_opt = lambda: client_opt_cls(learning_rate=arg.client_lr)
 

@@ -1,9 +1,10 @@
-"""This file defines the layers for the transformer model.
+"""This file defines the layers for the transformer-pointer model.
 
 The model layers consists of the transformer encoder layer that computes the
-contextual embedding of the input tokens. The intent is predicted by
-passing a concatenation of all the contextual embeddings though a
-linear layer. The decoder is used to predict the slot tokens. Most of
+contextual embedding of the input tokens. The contextual embedding are passed
+to the decoder along with the previous predicted tokens to generate a sequence
+of annotated sentences. The annotates sequence consists of Intent and Slot
+labels along with pointers to the tokens in the input sequence. Some of
 the code was in this file was taken from
 https://www.tensorflow.org/tutorials/text/transformer.
 
@@ -94,6 +95,42 @@ def scaled_dot_product_attention(query, key, value, mask):
     output = tf.matmul(attention_weights, value)  # (..., seq_len_q, depth_v)
 
     return output, attention_weights
+
+
+class BiliearAttention(tf.keras.layers.Layer):
+    """Defines the Bi-linear attention layer to compute the logits for the
+    pointer network.
+
+    Attributes:
+        d_model: The dimensionality of the contextual embeddings.
+    """
+    def __init__(self, d_model):
+        super(BiliearAttention, self).__init__()
+        self.d_model = d_model
+
+        self.bi_linear_weights = tf.keras.layers.Dense(d_model)
+
+    def get_config(self):
+        """Creates config for this layer.
+        """
+        config = super().get_config().copy()
+        config.update({'d_model': self.d_model})
+        return config
+
+    def call(self, key, query, mask):
+        """Forward pass for the Bi-linear Attention layer.
+        """
+        #mask need to be (bs, 1, input_seq_len)
+
+        weighted_keys = self.bi_linear_weights(key)
+        attention_score = tf.keras.layers.Dot(axes=[2, 2])(
+            [query, weighted_keys])  #(bs, output_seq_len, input_seq_len)
+
+        # # add the mask to mask out PAD token in the inputs.
+        if mask is not None:
+            attention_score += (mask * -1e9)
+
+        return attention_score
 
 
 class MultiHeadAttention(tf.keras.layers.Layer):
@@ -496,78 +533,47 @@ class Decoder(tf.keras.layers.Layer):
         return outputs, attention_weights
 
 
-class SlotHead(tf.keras.layers.Layer):
-    """Defines the SlotHead which computes the slot for each input token.
+class OutputHead(tf.keras.layers.Layer):
+    """Defines the Output Head which computes the next token in the annotated
+    output sequence.
 
     The slot head uses a linear layer on top of the contextual embeddings
-    from the transformer encoder to predict the slots for each input token.
+    from the transformer decoder to generate scores for the intent/slot labels
+    and used a BiLinear Attention layer to generate the scores for the pointer
+    network. Both of these scores are then concatenated.
 
     Attributes:
         slot_vocab_size: The size of the slot vocabulary.
     """
-    def __init__(self, slot_vocab_size):
-        super(SlotHead, self).__init__()
-        self.slot_vocab_size = slot_vocab_size
-
-        self.slot_layer = tf.keras.layers.Dense(slot_vocab_size)
-
-    def get_config(self):
-        """Creates config for this layer.
-        """
-        config = super().get_config().copy()
-        config.update({'slot_vocab_size': self.slot_vocab_size})
-        return config
-
-    def call(self, inputs):
-        """Forward pass for the Slot Head.
-      """
-        out = self.slot_layer(inputs)
-
-        return out  # (batch_size, input_seq_len, slot_vocab_size)
-
-
-class IntentHead(tf.keras.layers.Layer):
-    """Defines the IntentHead which computes the intent of the given input.
-
-    The intent head uses a linear layer on the concatenation of all the
-    contextual embeddings for the given input to predict the intent.
-
-    Attributes:
-        intent_vocab_size: The size of the intent vocabulary.
-        d_model: The dimensionality of the embeddings.
-        seq_len: The sequence length of the inputs to the transformer.
-    """
-    def __init__(self, intent_vocab_size, d_model, seq_len):
-        super(IntentHead, self).__init__()
-
-        self.intent_vocab_size = intent_vocab_size
+    def __init__(self, intent_slot_vocab_size, d_model):
+        super(OutputHead, self).__init__()
+        self.intent_slot_vocab_size = intent_slot_vocab_size
         self.d_model = d_model
-        self.seq_len = seq_len
 
-        self.intent_layer = tf.keras.layers.Dense(intent_vocab_size)
+        self.intent_slot_layer = tf.keras.layers.Dense(intent_slot_vocab_size)
+        self.pointer_layer = BiliearAttention(d_model)
 
     def get_config(self):
         """Creates config for this layer.
         """
         config = super().get_config().copy()
         config.update({
-            'intent_vocab_size': self.intent_vocab_size,
+            'intent_slot_vocab_size': self.intent_slot_vocab_size,
             'd_model': self.d_model,
-            'seq_len': self.seq_len
         })
         return config
 
-    def call(self, inputs, mask):
-        """Forward pass for the Intent head.
-      """
-        batch_size = tf.shape(inputs)[0]
+    def call(self, encoder_outputs, decoder_outputs, pointer_mask):
+        """Forward pass for the Output Head.
+        """
 
-        #Apply masking
-        inputs = tf.multiply(inputs, mask)
+        intent_slot_outputs = self.intent_slot_layer(
+            decoder_outputs
+        )  # (batch_size, output_seq_len, intent_slot_vocab_size)
+        pointer_outputs = self.pointer_layer(
+            encoder_outputs, decoder_outputs,
+            pointer_mask)  # (batch_size, output_seq_len, input_seq_len)
 
-        inputs = tf.reshape(
-            inputs, (batch_size, self.seq_len *
-                     self.d_model))  # (batch_size, input_seq_len*d_model)
-        out = self.intent_layer(inputs)
+        out = tf.concat([intent_slot_outputs, pointer_outputs], axis=-1)
 
-        return out  # (batch_size, intent_vocab_size)
+        return out  # (batch_size, output_seq_len, intent_slot_vocab_size + input_seq_len)

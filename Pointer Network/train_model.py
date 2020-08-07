@@ -1,8 +1,8 @@
 """This file implements the pipeline for training the model.
 
 This file defines a complete pipline to train to train and test
-a transformer-based model to predict intents and slots on the ATIS
-ans Snips datasets. Some of the code was in this file was taken
+a transformer-based model to predict intents and slots on the TOP
+dataset. Some of the code was in this file was taken
 from https://www.tensorflow.org/tutorials/text/transformer.
 
   Typical usage example:
@@ -13,15 +13,16 @@ from https://www.tensorflow.org/tutorials/text/transformer.
 import os
 import argparse
 import json
+import time
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 from tensorflow import keras
 
-from model_layers import Encoder, Decoder, SlotHead, IntentHead
+from model_layers import Encoder, Decoder, OutputHead
 from data_utils import load_data, create_vocabulary, load_vocabulary
-from model_utils import evaluate, masked_slot_loss, IntentSlotAccuracy, IntentAccuracy
+from model_utils import evaluate, MaskedLoss, IntentSlotAccuracy
 from generate_splits import generate_iid_splits, generate_splits_type3
 
 tf.compat.v1.enable_v2_behavior()
@@ -56,19 +57,19 @@ def parse_arguments():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--batch_size',
                         type=int,
-                        default=8,
+                        default=16,
                         help='Batch size.')
     parser.add_argument('--num_layers',
                         type=int,
-                        default=3,
+                        default=4,
                         help='The number of transformer layers.')
     parser.add_argument('--d_model',
                         type=int,
-                        default=64,
+                        default=128,
                         help='The dimensionality of the embeddings.')
     parser.add_argument('--dff',
                         type=int,
-                        default=256,
+                        default=512,
                         help='The hidden layer size.')
     parser.add_argument('--num_heads',
                         type=int,
@@ -76,15 +77,19 @@ def parse_arguments():
                         help='The number of heads in attention layer.')
     parser.add_argument('--rate',
                         type=float,
-                        default=0.1,
+                        default=0.0,
                         help='The dropout rate to be used.')
     parser.add_argument('--dataset',
                         type=str,
-                        default='atis',
+                        default='top',
                         help='Type atis or snips')
-    parser.add_argument('--max_seq_len',
+    parser.add_argument('--max_input_seq_len',
                         type=int,
-                        default=48,
+                        default=56,
+                        help='Maximum sequence length')
+    parser.add_argument('--max_output_seq_len',
+                        type=int,
+                        default=66,
                         help='Maximum sequence length')
     parser.add_argument('--model_path',
                         type=str,
@@ -108,16 +113,12 @@ def parse_arguments():
                         help='Path to validation data files.')
     parser.add_argument('--input_file',
                         type=str,
-                        default='seq.in',
+                        default='inputs.txt',
                         help='Input file name.')
-    parser.add_argument('--slot_file',
+    parser.add_argument('--output_file',
                         type=str,
-                        default='seq.out',
-                        help='Slot file name.')
-    parser.add_argument('--intent_file',
-                        type=str,
-                        default='label',
-                        help='Intent file name.')
+                        default='outputs.txt',
+                        help='Outputs file name.')
     parser.add_argument('--chkdir',
                         type=str,
                         default='./checkpoints/reduce_num_rounds_lr',
@@ -129,7 +130,7 @@ def parse_arguments():
     parser.add_argument(
         '--epochs_per_round',
         type=int,
-        default=5,
+        default=1,
         help='Number of epochs per round of federated training.')
     parser.add_argument('--num_rounds',
                         type=int,
@@ -143,7 +144,7 @@ def parse_arguments():
     parser.add_argument(
         '--num_clients',
         type=int,
-        default=30,
+        default=100,
         help=
         'Number of clients to be used for federated simulation for iid-splits.'
     )
@@ -157,11 +158,11 @@ def parse_arguments():
                         help='Optimizer to be used for client training.')
     parser.add_argument('--server_lr',
                         type=float,
-                        default=1.0,
+                        default=10.0,
                         help='Learning rate of the server optimizer.')
     parser.add_argument('--client_lr',
                         type=float,
-                        default=0.02,
+                        default=0.1,
                         help='Learning rate of the client optimizer.')
     parser.add_argument('--momentum',
                         type=float,
@@ -187,14 +188,23 @@ def parse_arguments():
     return arg
 
 
-def create_load_vocab(arg, file_name, out_file_name, no_pad=False):
+def create_load_vocab(arg,
+                      file_name,
+                      out_file_name,
+                      pad=True,
+                      unk=True,
+                      sos_eos=False):
     """Creates and loads the vocab file for a given corpus.
 
     Args:
     arg: The output of the parser.
     file_name: The name of the file containing the corpus.
     out_file_name: The file into which the vocab should be written into.
-    no_pad: A boolean to indicate if the pad token should be included
+    pad: A boolean to indicate if the pad token should be included
+        in the vocabulary.
+    unk: A boolean to indicate if the unknown token should be included
+        in the vocabulary.
+    sos_eos: A boolean to indicate if the SOS and EOS token should be included
         in the vocabulary.
 
     Returns:
@@ -202,83 +212,80 @@ def create_load_vocab(arg, file_name, out_file_name, no_pad=False):
     includes a list of all the vocabulary.
     """
 
-    full_path = os.path.join('./data', arg.dataset, arg.train_data_path,
-                             file_name)
+    full_path = os.path.join('./top_data', arg.train_data_path, file_name)
     output_path = os.path.join(arg.vocab_path, out_file_name)
 
-    create_vocabulary(full_path, output_path, no_pad=no_pad)
+    create_vocabulary(full_path, output_path, pad, unk, sos_eos)
     vocab = load_vocabulary(output_path)
 
     return vocab
 
 
-def load_dataset(arg, data_path, in_vocab, slot_vocab, intent_vocab):
+def load_dataset(arg, data_path, in_vocab, out_vocab):
     """Returns the dataset that is loaded from the disk.
 
     Args:
     arg: The output of the parser.
     data_path: The path of the dataset to be loaded.
     in_vocab: The vocabulary of the input sentences.
-    slot_vocab: The vocabulary of slot labels.
-    intent_vocab: The vocabulary of intent labels.
+    out_vocab: The vocabulary of output sequences.
 
     Returns:
-    The input data, slot data and the intent data as numpy arrays.
+    The input data, output data as numpy arrays.
     """
 
-    full_path = os.path.join('./data', arg.dataset, data_path)
+    full_path = os.path.join('./top_data', data_path)
 
     input_path = os.path.join(full_path, arg.input_file)
-    slot_path = os.path.join(full_path, arg.slot_file)
-    intent_path = os.path.join(full_path, arg.intent_file)
+    output_path = os.path.join(full_path, arg.output_file)
 
-    in_data, slot_data, intent_data = load_data(input_path, slot_path,
-                                                intent_path, in_vocab,
-                                                slot_vocab, intent_vocab,
-                                                arg.max_seq_len)
+    in_data, output_data = load_data(input_path, output_path, in_vocab,
+                                     out_vocab, arg.max_input_seq_len,
+                                     arg.max_output_seq_len)
 
-    return in_data, slot_data, intent_data
+    return in_data, output_data
 
 
 def load_vocab(arg):
     """Creates and loads vocabulary for the input sentences,
-    slot labels and intent labels.
+    and annotated sentences.
 
     Args:
     arg: The output of the parser.
 
     Returns:
-    The vocabulary for the input, slot and intents.
+    The vocabulary for the inputs and outputs.
     """
 
     in_vocab = create_load_vocab(arg, arg.input_file, 'in_vocab')
-    slot_vocab = create_load_vocab(arg, arg.slot_file, 'slot_vocab')
-    intent_vocab = create_load_vocab(arg, arg.intent_file, 'intent_vocab',
-                                     True)
+    out_vocab = create_load_vocab(arg,
+                                  arg.output_file,
+                                  'out_vocab',
+                                  sos_eos=True)
 
-    return in_vocab, slot_vocab, intent_vocab
+    return in_vocab, out_vocab
 
 
 def create_keras_model(arg,
                        input_vocab_size,
-                       slot_vocab_size,
-                       intent_vocab_size,
-                       pe_max=64):
-    """Defines and creates a keras transformer model for the
-    joint prediction of intents and slots.
+                       out_vocab_size,
+                       pe_input=64,
+                       pe_output=128):
+    """Defines and creates a keras transformer-based model
+    to generate the annotates sequence for a given input.
 
     Args:
     arg: The output of the parser.
     input_vocab_size: The size of the input vocabulary.
-    slot_vocab_size: The size of the slot vocabulary.
-    intent_vocab_size: The size of the intent vocabulary.
-    pe_max: Maximum index of positional encodings required.
+    out_vocab_size: The size of the output vocabulary.
+    pe_input: Maximum index of positional encodings required for the input.
+    pe_output: Maximum index of positional encodings required for the output.
 
     Returns:
     A un-compiled keras model.
     """
     sent_input = keras.layers.Input(shape=(None, ))
-    slot_input = keras.layers.Input(shape=(None, ))
+    intent_slot_input = keras.layers.Input(shape=(None, ))
     padding_mask = keras.layers.Input(shape=(
         1,
         1,
@@ -289,35 +296,34 @@ def create_keras_model(arg,
         None,
         None,
     ))
-    intent_mask = keras.layers.Input(shape=(None, 1))
+    pointer_mask = keras.layers.Input(shape=(
+        1,
+        None,
+    ))
 
     # Define the layers
     encoder = Encoder(arg.num_layers, arg.d_model, arg.num_heads, arg.dff,
-                      input_vocab_size, pe_max, arg.rate)
+                      input_vocab_size, pe_input, arg.rate)
 
     decoder = Decoder(arg.num_layers, arg.d_model, arg.num_heads, arg.dff,
-                      slot_vocab_size, pe_max, arg.rate)
+                      out_vocab_size, pe_output, arg.rate)
 
-    intent_head = IntentHead(intent_vocab_size, arg.d_model, arg.max_seq_len)
-
-    slot_head = SlotHead(slot_vocab_size)
+    output_head = OutputHead(out_vocab_size - arg.max_input_seq_len,
+                             arg.d_model)
 
     # Define the forward pass of the model
     enc_output = encoder(sent_input, padding_mask)
 
-    dec_output, _ = decoder(slot_input, enc_output, look_ahead_mask,
+    dec_output, _ = decoder(intent_slot_input, enc_output, look_ahead_mask,
                             padding_mask)
 
-    intent_output = intent_head(
-        enc_output, intent_mask)  # (batch_size, tar_seq_len, intent_vocab_size
-
-    slot_output = slot_head(
-        dec_output)  # (batch_size, tar_seq_len, slot_vocab_size)
+    output = output_head(enc_output, dec_output, pointer_mask)
 
     model = keras.Model(inputs=[
-        sent_input, slot_input, padding_mask, look_ahead_mask, intent_mask
+        sent_input, intent_slot_input, padding_mask, look_ahead_mask,
+        pointer_mask
     ],
-                        outputs=[slot_output, intent_output])
+                        outputs=[output])
 
     return model
 
@@ -328,13 +334,12 @@ def preprocess(dataset, arg):
     Args:
     dataset: The tensor containing the training data.
     arg: The output of the parser.
-    epochs_per_rounds: Number of epochs per rounds of federated training.
 
     Returns:
     The pre-processed dataset.
     """
-    return (dataset.repeat(arg.epochs_per_round).shuffle(BUFFER_SIZE).batch(
-        arg.batch_size, drop_remainder=False))
+    return dataset.repeat(arg.epochs_per_round).shuffle(BUFFER_SIZE).batch(
+        arg.batch_size, drop_remainder=False)
 
 
 def get_optimizers(arg):
@@ -369,7 +374,6 @@ def make_federated_data(client_data, client_ids, arg):
     Args:
     client_train_data: Collection of all the client datasets.
     client_ids: ID's of the clients to be used to create the dataset.
-    epochs_per_rounds: Number of epochs per rounds of federated training.
     arg: The output of the parser.
 
     Returns:
@@ -381,30 +385,24 @@ def make_federated_data(client_data, client_ids, arg):
     ]
 
 
-def create_tff_model(arg, input_vocab_size, slot_vocab_size, intent_vocab_size,
-                     input_spec):
+def create_tff_model(arg, in_vocab_size, out_vocab_size, input_spec):
     """Creates a enhanced model to be used by TFF.
 
     Args:
     arg: The output of the parser.
     input_vocab_size: The size of the input vocabulary.
-    slot_vocab_size: The size of the slot vocabulary.
-    intent_vocab_size: The size of the intent vocabulary.
+    out_vocab_size: The size of the output vocabulary.
     input_spec: Types and shapes that the model expects.
 
     Returns:
-    A list of dataset for each client.
+    A enhanced TFF model.
     """
-    keras_model = create_keras_model(arg, input_vocab_size, slot_vocab_size,
-                                     intent_vocab_size)
-    return tff.learning.from_keras_model(
-        keras_model,
-        input_spec=input_spec,
-        loss=[
-            masked_slot_loss,
-            tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-        ],
-        metrics=[IntentSlotAccuracy(), IntentAccuracy()])
+    keras_model = create_keras_model(arg, in_vocab_size, out_vocab_size)
+
+    return tff.learning.from_keras_model(keras_model,
+                                         input_spec=input_spec,
+                                         loss=[MaskedLoss()],
+                                         metrics=[IntentSlotAccuracy()])
 
 
 def manage_checkpoints(model, arg):
@@ -434,14 +432,13 @@ def manage_checkpoints(model, arg):
     return checkpoint_manager, summary_writer
 
 
-def generate_splits(in_data, slot_data, intent_data, arg):
+def generate_splits(in_data, out_data, arg):
     """Generates either IID or non-IID splits of the training data
     depending on the user input.
 
     Args:
     in_data: A tensor of input queries.
-    slot_data: A tensor of slot labels.
-    intent_data: A tensor of intent labels.
+    out_data: A tensor of output sequences.
     arg: The parsed arguments.
 
     Returns:
@@ -451,11 +448,9 @@ def generate_splits(in_data, slot_data, intent_data, arg):
     splits = None
 
     if arg.split_type == 'iid':
-        splits = generate_iid_splits(in_data, slot_data, intent_data,
-                                     arg.num_clients)
+        splits = generate_iid_splits(in_data, out_data, arg.num_clients)
     elif arg.split_type == 'non_iid':
-        splits, arg.num_clients = generate_splits_type3(
-            in_data, slot_data, intent_data)
+        splits, arg.num_clients = generate_splits_type3(in_data, out_data)
 
     return splits
 
@@ -467,29 +462,28 @@ def main():
 
     arg = parse_arguments()
 
-    in_vocab, slot_vocab, intent_vocab = load_vocab(arg)
+    in_vocab, out_vocab = load_vocab(arg)
 
     # Loading data
-    train_in_data, train_slot_data, train_intent_data = load_dataset(
-        arg, arg.train_data_path, in_vocab, slot_vocab, intent_vocab)
+    train_in_data, train_out_data = load_dataset(arg, arg.train_data_path,
+                                                 in_vocab, out_vocab)
 
-    valid_in_data, valid_slot_data, valid_intent_data = load_dataset(
-        arg, arg.valid_data_path, in_vocab, slot_vocab, intent_vocab)
+    valid_in_data, valid_out_data = load_dataset(arg, arg.valid_data_path,
+                                                 in_vocab, out_vocab)
 
-    test_in_data, test_slot_data, test_intent_data = load_dataset(
-        arg, arg.test_data_path, in_vocab, slot_vocab, intent_vocab)
+    test_in_data, test_out_data = load_dataset(arg, arg.test_data_path,
+                                               in_vocab, out_vocab)
 
     valid_dataset = tf.data.Dataset.from_tensor_slices(
-        (valid_in_data, valid_slot_data, valid_intent_data))
-    valid_dataset = valid_dataset.batch(512, drop_remainder=False)
+        (valid_in_data, valid_out_data))
+    valid_dataset = valid_dataset.batch(2048, drop_remainder=False)
 
     test_dataset = tf.data.Dataset.from_tensor_slices(
-        (test_in_data, test_slot_data, test_intent_data))
-    test_dataset = test_dataset.batch(512, drop_remainder=False)
+        (test_in_data, test_out_data))
+    test_dataset = test_dataset.batch(2048, drop_remainder=False)
 
     # Generate splits of data for federated simulation
-    ftrain_data = generate_splits(train_in_data, train_slot_data,
-                                  train_intent_data, arg)
+    ftrain_data = generate_splits(train_in_data, train_out_data, arg)
     ftrain_data = tff.simulation.FromTensorSlicesClientData(ftrain_data)
 
     if arg.clients_per_round == -1:
@@ -497,24 +491,22 @@ def main():
 
     # Define a non-federated model for checkpointing
     local_model = create_keras_model(arg, len(in_vocab['vocab']),
-                                     len(slot_vocab['vocab']),
-                                     len(intent_vocab['vocab']))
+                                     len(out_vocab['vocab']))
 
     checkpoint_manager, summary_writer = manage_checkpoints(local_model, arg)
 
     summary_writer.set_as_default()
 
-    # Generate a sample dataset
-    raw_example_dataset = ftrain_data.create_tf_dataset_for_client('1')
+    # Generate a sample dataset for the input spec
+    raw_example_dataset = ftrain_data.create_tf_dataset_for_client('0')
     example_dataset = preprocess(raw_example_dataset, arg)
 
     server_opt, client_opt = get_optimizers(arg)
 
     # Define the federated averaging process
     iterative_process = tff.learning.build_federated_averaging_process(
-        lambda: create_tff_model(
-            arg, len(in_vocab['vocab']), len(slot_vocab['vocab']),
-            len(intent_vocab['vocab']), example_dataset.element_spec),
+        lambda: create_tff_model(arg, len(in_vocab[
+            'vocab']), len(out_vocab['vocab']), example_dataset.element_spec),
         client_optimizer_fn=client_opt,
         server_optimizer_fn=server_opt)
 
@@ -522,7 +514,11 @@ def main():
 
     best_validation_acc = 0.0
 
+    print('Training:')
+
     for round_num in range(1, arg.num_rounds):
+        start = time.time()
+
         # Sample a subset of clients to be used for this round
         client_subset = np.random.choice(arg.num_clients,
                                          arg.clients_per_round,
@@ -533,13 +529,12 @@ def main():
         # Perform one round of federated training
         server_state, metrics = iterative_process.next(server_state,
                                                        ftrain_data_subset)
+        # metrics = metrics.train
 
         # Compute and log validation metrics
         tff.learning.assign_weights_to_keras_model(local_model,
                                                    server_state.model)
-        semantic_acc, intent_acc, f1_score = evaluate(local_model,
-                                                      valid_dataset,
-                                                      slot_vocab)
+        overall_accuracy = evaluate(local_model, valid_dataset, out_vocab)
 
         tf.summary.scalar('Train loss',
                           metrics._asdict()['loss'],
@@ -549,21 +544,18 @@ def main():
                           step=round_num)
 
         tf.summary.scalar('Validation Intent Slot Accuracy',
-                          semantic_acc,
-                          step=round_num)
-        tf.summary.scalar('Validation f1 Score', f1_score, step=round_num)
-        tf.summary.scalar('Validation Intent Accuracy',
-                          intent_acc,
+                          overall_accuracy,
                           step=round_num)
 
-        # Save the best model so far
-        if semantic_acc > best_validation_acc:
-            best_validation_acc = semantic_acc
+        # # Save the best model so far
+        if overall_accuracy > best_validation_acc:
+            best_validation_acc = overall_accuracy
             checkpoint_save_path = checkpoint_manager.save()
             print('Saving checkpoint for epoch {} at {}'.format(
                 round_num, checkpoint_save_path))
 
         print('round {:2d}, metrics={}'.format(round_num, metrics))
+        print('Time taken : {}'.format(time.time() - start))
 
 
 if __name__ == '__main__':

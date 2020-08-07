@@ -16,16 +16,22 @@ SOS_TOKEN = '__SOS'
 EOS_TOKEN = '__EOS'
 
 
-def create_vocabulary(input_path, output_path, no_pad=False, no_unk=False):
+def create_vocabulary(input_path,
+                      output_path,
+                      pad=True,
+                      unk=True,
+                      sos_eos=False):
     """Creates the vocabulary by parsing the given data ans saves it in
     the output path.
 
     Args:
     input_path: The path to the corpus for which vocabulary has to be built.
     output_path: The path to which the vocabulary has to be saved.
-    no_pad: A boolean variable to indicate if a padding token is to be
+    pad: A boolean variable to indicate if the padding token is to be
         added to the vocabulary.
-    no_unk: A boolean variable to indicate if a unknown token is to be
+    unk: A boolean variable to indicate if the unknown token is to be
+        added to the vocabulary.
+    sos_eos: A boolean variable to indicate if the SOS and EOS tokens are to
         added to the vocabulary.
     """
     if not isinstance(input_path, str):
@@ -34,7 +40,9 @@ def create_vocabulary(input_path, output_path, no_pad=False, no_unk=False):
     if not isinstance(output_path, str):
         raise TypeError('output_path should be string')
 
-    vocab = {}
+    vocab = []
+    pointer_vocab = []
+
     with open(input_path, 'r') as fd, \
             open(output_path, 'w+') as out:
 
@@ -47,15 +55,21 @@ def create_vocabulary(input_path, output_path, no_pad=False, no_unk=False):
                     pass
                 if str.isdigit(word):
                     word = '0'
-                if word in vocab:
-                    vocab[word] += 1
-                else:
-                    vocab[word] = 1
-        if not no_pad:
-            vocab = [PADDING_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + sorted(
-                vocab, key=vocab.get, reverse=True)
-        else:
-            vocab = [UNK_TOKEN] + sorted(vocab, key=vocab.get, reverse=True)
+                if word.startswith('@ptr') and word not in pointer_vocab:
+                    pointer_vocab.append(word)
+                elif word not in vocab and not word.startswith('@ptr'):
+                    vocab.append(word)
+
+        extra_tokens = []
+        if pad:
+            extra_tokens += [PADDING_TOKEN]
+        if unk:
+            extra_tokens += [UNK_TOKEN]
+        if sos_eos:
+            extra_tokens += [SOS_TOKEN, EOS_TOKEN]
+
+        vocab = extra_tokens + vocab + pointer_vocab
+
         for vocab_word in vocab:
             out.write(vocab_word + '\n')
 
@@ -117,66 +131,58 @@ def sentence_to_ids(data, vocab):
 
 
 def load_data(in_path,
-              slot_path,
-              intent_path,
+              out_path,
               in_vocab,
-              slot_vocab,
-              intent_vocab,
-              maxlen=48):
+              out_vocab,
+              max_input_len=56,
+              max_output_len=66):
     """Loads the data from the given path and preprocesses the data
     by converting the tokens into ID's using the vocab dictionary.
     Additionally, tokens are padded to the maxlen before returning.
 
     Args:
     in_path: The path to the file contating the input queries.
-    slot_path: The path to the file contating the slot labels.
+    out_path: The path to the file contating the annotated outputs.
     intent_path: The path to the file contating the intent labels.
     in_vocab: The vocabulary of the input sentences.
-    slot_vocab: The vocabulary of slot labels.
-    intent_vocab: The vocabulary of intent labels.
+    out_vocab: The vocabulary of outputs.
+    max_input_len: The maximum length of the input sequences.
+    max_output_len: The maximum length of the output sequences.
 
     Returns:
-    The preprocesses input data, slot lables and the intents.
+    The preprocessed input data and output sequences.
     """
 
     in_data = []
-    slot_data = []
-    intent_data = []
+    out_data = []
 
     with open(in_path, 'r') as input_fd, \
-      open(intent_path, 'r') as intent_fd, \
-      open(slot_path, 'r') as slot_fd:
+      open(out_path, 'r') as out_fd:
 
-        for inputs, intent, slot in zip(input_fd, intent_fd, slot_fd):
-            inputs, intent, slot = inputs.rstrip(), intent.rstrip(
-            ), slot.rstrip()
-            in_data.append(
-                sentence_to_ids(SOS_TOKEN + ' ' + inputs + ' ' + EOS_TOKEN,
-                                in_vocab))
-            intent_data.append(sentence_to_ids(intent, intent_vocab))
-            slot_data.append(
-                sentence_to_ids(SOS_TOKEN + ' ' + slot + ' ' + EOS_TOKEN,
-                                slot_vocab))
+        for inputs, outputs in zip(input_fd, out_fd):
+            inputs, outputs = inputs.rstrip(), outputs.strip()
+            in_data.append(sentence_to_ids(inputs, in_vocab))
+            out_data.append(
+                sentence_to_ids('__SOS  ' + outputs + ' __EOS', out_vocab))
 
-    in_data = tf.keras.preprocessing.sequence.pad_sequences(in_data,
-                                                            padding='post',
-                                                            maxlen=maxlen)
-    slot_data = tf.keras.preprocessing.sequence.pad_sequences(slot_data,
-                                                              padding='post',
-                                                              maxlen=maxlen)
-    return in_data, slot_data, intent_data
+    in_data = tf.keras.preprocessing.sequence.pad_sequences(
+        in_data, padding='post', maxlen=max_input_len)
+    out_data = tf.keras.preprocessing.sequence.pad_sequences(
+        out_data, padding='post', maxlen=max_output_len)
+    return in_data, out_data
 
 
 def create_padding_mask(seq):
     """Creates the paddding mask that will be used by the encoder
-    for masking out the padding tokens. It also create the intent
-    mask for masking out the padding tokens in the IntentHead.
+    for masking out the padding tokens. It also create the pointer
+    mask for masking out the padding tokens in the while computing
+    the pointer scores.
 
     Args:
     seq: The sequence of inputs to be passed to the model.
 
     Returns:
-    The encoder mask and the intent mask.
+    The encoder mask and the pointer mask.
     """
 
     enc_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
@@ -184,10 +190,10 @@ def create_padding_mask(seq):
     enc_mask = enc_mask[:, tf.newaxis,
                         tf.newaxis, :]  # (batch_size, 1, 1, seq_len)
 
-    intent_mask = tf.cast(tf.math.not_equal(seq, 0), tf.float32)
-    intent_mask = intent_mask[:, :, tf.newaxis]
+    pointer_mask = tf.cast(tf.math.equal(seq, 0), tf.float32)
+    pointer_mask = pointer_mask[:, tf.newaxis, :]
 
-    return enc_mask, intent_mask
+    return enc_mask, pointer_mask
 
 
 def create_look_ahead_mask(size):
@@ -207,11 +213,12 @@ def create_masks(inputs, target):
     target: The slot targets to be passed to the decoder.
 
     Returns:
-    The encoder mask and the intent mask.
+    The padding mask, the combined mask for the decoder and and the
+    pointer mask.
     """
 
     # padding mask same for encoder and decoder
-    padding_mask, intent_mask = create_padding_mask(inputs)
+    padding_mask, pointer_mask = create_padding_mask(inputs)
 
     # Used in the 1st attention block in the decoder.
     # It is used to pad and mask future tokens in the input received by
@@ -220,4 +227,4 @@ def create_masks(inputs, target):
     dec_target_padding_mask, _ = create_padding_mask(target)
     combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
 
-    return padding_mask, combined_mask, intent_mask
+    return padding_mask, combined_mask, pointer_mask
